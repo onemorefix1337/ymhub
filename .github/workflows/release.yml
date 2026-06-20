@@ -24,8 +24,8 @@ jobs:
       - name: Stage artifacts
         run: |
           mkdir release
-          copy build\bin\YMHub.exe release\YMHub.exe
-          copy build\bin\YMHubDll.dll release\YMHubDll.dll
+          copy build\bin\Release\YMHub.exe release\YMHub.exe
+          copy build\bin\Release\YMHubDll.dll release\YMHubDll.dll
         shell: cmd
 
       - name: Create release
