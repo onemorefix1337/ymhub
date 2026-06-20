@@ -524,7 +524,7 @@ static bool HttpsGet(const wchar_t* host,const wchar_t* path,std::string& outBod
     WinHttpCloseHandle(hSession);
     return ok;}
 
-static bool HttpsDownloadToFile(const std::wstring& url,const std::wstring& destPath){
+static bool HttpsDownloadToFileOnce(const std::wstring& url,const std::wstring& destPath){
     if(url.substr(0,8)!=L"https://")return false;
     auto rest=url.substr(8);
     auto slash=rest.find(L'/');
@@ -559,6 +559,16 @@ static bool HttpsDownloadToFile(const std::wstring& url,const std::wstring& dest
         WinHttpCloseHandle(hConnect);}
     WinHttpCloseHandle(hSession);
     return ok;}
+
+// The release-asset download (github.com redirecting to the CDN) has been
+// observed to fail transiently once in a while — retry a couple of times
+// before giving up, same lesson as the album-art fetch retries.
+static bool HttpsDownloadToFile(const std::wstring& url,const std::wstring& destPath){
+    for(int attempt=0;attempt<3;attempt++){
+        if(attempt>0)Sleep(800);
+        if(HttpsDownloadToFileOnce(url,destPath))return true;
+    }
+    return false;}
 
 // Pulls tag_name + the YMHub.exe asset URL out of GitHub's "latest
 // release" JSON via plain substring search (consistent with the rest of
