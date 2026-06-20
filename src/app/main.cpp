@@ -59,6 +59,7 @@ static HWND      g_hub    = nullptr;   // hub
 static HINSTANCE g_hInst  = nullptr;
 static HHOOK     g_hook   = nullptr;
 static bool      g_visible = false;
+static HANDLE    g_instanceMutex = nullptr; // single-instance lock, released early during self-update
 static int       g_scrW = 0, g_scrH = 0;
 
 // Overlay WebView2
@@ -610,6 +611,11 @@ static void ApplyUpdateAndRestart(const std::wstring& newExePath){
     if(!MoveFileW(newExePath.c_str(),curPath)){
         MoveFileW(oldPath.c_str(),curPath); // best-effort rollback
         return;}
+    // The new process does a single-instance check on the same named
+    // mutex — release it now (the old process is still shutting down
+    // and would otherwise hold it long enough for the new one to see
+    // ERROR_ALREADY_EXISTS and exit immediately, leaving nothing running).
+    if(g_instanceMutex){CloseHandle(g_instanceMutex);g_instanceMutex=nullptr;}
     STARTUPINFOW si{};si.cb=sizeof(si);
     PROCESS_INFORMATION pi{};
     std::wstring cmd=L"\""+std::wstring(curPath)+L"\"";
@@ -1768,8 +1774,8 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
 // ── Entry ─────────────────────────────────────────────────
 int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     g_hInst=hInst;
-    HANDLE mx=CreateMutexW(nullptr,TRUE,L"YMHub_Host_v1");
-    if(GetLastError()==ERROR_ALREADY_EXISTS){CloseHandle(mx);return 0;}
+    g_instanceMutex=CreateMutexW(nullptr,TRUE,L"YMHub_Host_v1");
+    if(GetLastError()==ERROR_ALREADY_EXISTS){CloseHandle(g_instanceMutex);return 0;}
 
     InitializeCriticalSection(&g_artCS);
     winrt::init_apartment(winrt::apartment_type::single_threaded);
@@ -1862,6 +1868,6 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     if(g_hMem){CloseHandle(g_hMem);g_hMem=nullptr;}
     UnhookWindowsHookEx(g_hook);
     DeleteCriticalSection(&g_artCS);
-    CloseHandle(mx);
+    if(g_instanceMutex)CloseHandle(g_instanceMutex);
     return 0;
 }
