@@ -195,8 +195,13 @@ static std::wstring CdpFindWsPath() {
     return std::wstring(path.begin(), path.end());
 }
 
+// No WinHttpWebSocketClose handshake here on purpose — it performs a
+// synchronous close exchange that has been observed to block far longer
+// than expected (same class of WinHTTP-timeout bug seen elsewhere in this
+// codebase), hanging this entire thread forever on teardown. We're either
+// tearing down or about to reconnect, so just drop the handle.
 static void CdpClose() {
-    if (g_cdpWs) { WinHttpWebSocketClose(g_cdpWs, 1000, nullptr, 0); WinHttpCloseHandle(g_cdpWs); g_cdpWs = nullptr; }
+    if (g_cdpWs) { WinHttpCloseHandle(g_cdpWs); g_cdpWs = nullptr; }
     if (g_cdpConnect) { WinHttpCloseHandle(g_cdpConnect); g_cdpConnect = nullptr; }
     if (g_cdpSession) { WinHttpCloseHandle(g_cdpSession); g_cdpSession = nullptr; }
 }
@@ -388,24 +393,35 @@ static void CdpInjectSettingsLogRow(const std::string& logBlobUtf8) {
     CdpRunJs(js);
 }
 
-// Confirms the actual player UI is present (not just that CDP is reachable)
-// before declaring success — checks for the like button in EITHER of its
-// two states ("Нравится" / "Не нравится", depending on whether the current
-// track is already liked), since checking only one label falsely reported
-// "player not found" whenever the track happened to already be liked.
-// Retries for a few seconds since the page can still be hydrating right
-// after a fresh launch.
+// Confirms the actual app UI is present (not just that CDP is reachable)
+// before declaring success. Originally checked only the like/dislike
+// button (in either of its two states), but that button doesn't exist at
+// all until a track is actually loaded into the player bar — if YM opened
+// without anything auto-resuming, there's nothing to find and this falsely
+// reported "player not found" despite everything working fine. Now also
+// accepts the search nav button, which is part of the app shell and is
+// present regardless of playback state. Retries for a few seconds since
+// the page can still be hydrating right after a fresh launch.
+//
+// A single transient CdpSend/CdpRecv failure (e.g. the websocket isn't
+// fully settled yet right after the upgrade) used to abort the whole check
+// immediately instead of retrying like the loop implies — that was the
+// other half of the false "player not found" reports. Now a failed
+// send/receive just closes and reconnects on the next iteration instead of
+// giving up outright.
 static bool CdpVerifyPlayerReady() {
     for (int i = 0; i < 20; i++) {
         if (i > 0) Sleep(500);
+        if (!CdpEnsureConnected()) continue;
         std::string req =
             "{\"id\":5,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":"
             "\"!!(document.querySelector(\\\"button[aria-label='\\u041d\\u0440\\u0430\\u0432\\u0438\\u0442\\u0441\\u044f']\\\")"
-            "||document.querySelector(\\\"button[aria-label='\\u041d\\u0435 \\u043d\\u0440\\u0430\\u0432\\u0438\\u0442\\u0441\\u044f']\\\"))\","
+            "||document.querySelector(\\\"button[aria-label='\\u041d\\u0435 \\u043d\\u0440\\u0430\\u0432\\u0438\\u0442\\u0441\\u044f']\\\")"
+            "||document.querySelector(\\\"button[aria-label='\\u041f\\u043e\\u0438\\u0441\\u043a']\\\"))\","
             "\"returnByValue\":true}}";
-        if (!CdpSend(req)) { CdpClose(); return false; }
+        if (!CdpSend(req)) { CdpClose(); continue; }
         std::string resp;
-        if (!CdpRecv(resp)) { CdpClose(); return false; }
+        if (!CdpRecv(resp)) { CdpClose(); continue; }
         if (resp.find("\"value\":true") != std::string::npos) return true;
     }
     return false;
