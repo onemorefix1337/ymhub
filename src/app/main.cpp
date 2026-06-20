@@ -1672,7 +1672,12 @@ static void SetupController(ICoreWebView2Controller* ctrl, ICoreWebView2* wv, bo
     (void)isHub;}
 
 static void InitWebView(){
-    CreateCoreWebView2EnvironmentWithOptions(nullptr,nullptr,nullptr,
+    // Default WebView2 behavior creates a "<exe>.WebView2" folder next to
+    // the executable — keep that out of wherever the user put YMHub.exe
+    // (e.g. Desktop) by pointing it at %TEMP% instead.
+    wchar_t tmp[MAX_PATH];GetTempPathW(MAX_PATH,tmp);
+    std::wstring userDataFolder=std::wstring(tmp)+L"YMHub.WebView2";
+    CreateCoreWebView2EnvironmentWithOptions(nullptr,userDataFolder.c_str(),nullptr,
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
         [](HRESULT,ICoreWebView2Environment* env)->HRESULT{
             if(!env)return S_OK;
