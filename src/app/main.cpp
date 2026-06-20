@@ -406,7 +406,33 @@ static void TryInject(){
     InjectDll(pid,dll);}
 
 // ── Chrome DevTools Protocol port (for background like/dislike) ───
+// Quick TCP connect probe — true if *something* is already listening on
+// 127.0.0.1:port (regardless of whether it's a valid CDP endpoint).
+static bool IsPortInUse(int port){
+    WSADATA wsa;
+    if(WSAStartup(MAKEWORD(2,2),&wsa)!=0)return false;
+    SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    bool inUse=false;
+    if(s!=INVALID_SOCKET){
+        u_long mode=1;ioctlsocket(s,FIONBIO,&mode); // non-blocking
+        sockaddr_in addr{};addr.sin_family=AF_INET;
+        addr.sin_port=htons((u_short)port);
+        InetPtonA(AF_INET,"127.0.0.1",&addr.sin_addr);
+        connect(s,(sockaddr*)&addr,sizeof(addr));
+        fd_set wr;FD_ZERO(&wr);FD_SET(s,&wr);
+        timeval tv{0,80000}; // 80ms — loopback, no real round-trip to wait for
+        inUse=select(0,nullptr,&wr,nullptr,&tv)>0;
+        closesocket(s);}
+    WSACleanup();
+    return inUse;}
+
+// WinHttpSetTimeouts is not reliably honored for the *connect* phase against
+// a closed port (observed ~2s per attempt instead of the configured 300ms —
+// the same WinHTTP-timeout class of bug seen elsewhere in this codebase).
+// Gate the slow WinHttp request behind the fast Winsock check above so a
+// 20-port scan over closed ports stays fast instead of taking ~40s.
 static bool ProbeDebugPort(int port){
+    if(!IsPortInUse(port))return false;
     HINTERNET hSession=WinHttpOpen(L"YMHub",WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
     if(!hSession)return false;
@@ -436,26 +462,6 @@ static void KillAllByExeName(const wchar_t* exeName){
                 if(h){TerminateProcess(h,0);CloseHandle(h);}}
         }while(Process32NextW(snap,&pe));}
     CloseHandle(snap);}
-
-// Quick TCP connect probe — true if *something* is already listening on
-// 127.0.0.1:port (regardless of whether it's a valid CDP endpoint).
-static bool IsPortInUse(int port){
-    WSADATA wsa;
-    if(WSAStartup(MAKEWORD(2,2),&wsa)!=0)return false;
-    SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-    bool inUse=false;
-    if(s!=INVALID_SOCKET){
-        u_long mode=1;ioctlsocket(s,FIONBIO,&mode); // non-blocking
-        sockaddr_in addr{};addr.sin_family=AF_INET;
-        addr.sin_port=htons((u_short)port);
-        InetPtonA(AF_INET,"127.0.0.1",&addr.sin_addr);
-        connect(s,(sockaddr*)&addr,sizeof(addr));
-        fd_set wr;FD_ZERO(&wr);FD_SET(s,&wr);
-        timeval tv{0,300000}; // 300ms
-        inUse=select(0,nullptr,&wr,nullptr,&tv)>0;
-        closesocket(s);}
-    WSACleanup();
-    return inUse;}
 
 // Pick a port for --remote-debugging-port: reuse one that's already
 // serving valid CDP (port==0 means "search from YM_CDP_PORT"), otherwise
