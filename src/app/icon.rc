@@ -1,1 +1,33 @@
+#include <winver.h>
+#include "../shared/version.h"
+
 1 ICON "icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION YMHUB_VERSION_MAJOR,YMHUB_VERSION_MINOR,YMHUB_VERSION_PATCH,0
+ PRODUCTVERSION YMHUB_VERSION_MAJOR,YMHUB_VERSION_MINOR,YMHUB_VERSION_PATCH,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "onemorefix1337"
+            VALUE "FileDescription", "YMHub - overlay player and hub for Yandex Music"
+            VALUE "FileVersion", YMHUB_VERSION
+            VALUE "InternalName", "YMHub"
+            VALUE "LegalCopyright", "(c) onemorefix1337"
+            VALUE "OriginalFilename", "YMHub.exe"
+            VALUE "ProductName", "YMHub"
+            VALUE "ProductVersion", YMHUB_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
