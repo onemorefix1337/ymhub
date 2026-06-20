@@ -82,9 +82,9 @@ static std::string CdpUtf8(const wchar_t* w) {
     return s;
 }
 
-// ── In-memory log, surfaced via a floating "YMHub" badge injected into
-// YM's own page (see LogBadgeThread) so the user can see what the DLL is
-// doing without attaching a debugger. Also mirrored to a file in %TEMP%
+// ── In-memory log, surfaced as a row in YM's own Settings page (see
+// LogBadgeThread / CdpInjectSettingsLogRow) so the user can see what the
+// DLL is doing without attaching a debugger. Also mirrored to a file in %TEMP%
 // so logs survive across injections.
 static std::mutex g_logMx;
 static std::vector<std::string> g_log;
@@ -322,32 +322,22 @@ static void CdpShowStage3Error(const wchar_t* message) {
     CdpRunJs(CdpUtf8(js.c_str()));
 }
 
-// A small fixed-position "YM" badge in the bottom-right corner of YM's own
-// window, present the whole session. Clicking it opens an M3-styled modal
-// with the DLL's recent log lines — there's no reliable way to anchor a
-// row inside YM's own (unversioned, undocumented) Settings page, so this
-// floating badge is the stable alternative. Idempotent: only builds the
-// DOM once, then just refreshes the log text each call so it stays current
-// even while the modal is open.
-static void CdpInjectLogBadge(const std::string& logBlobUtf8) {
+// Inserts a real row into YM's own Settings list (cloned from the "О
+// приложении" row so it matches YM's current visual style exactly, instead
+// of guessing at colors/spacing), right below it. The row only exists while
+// the Settings page is actually mounted — React unmounts the whole list
+// when leaving Settings, so this re-inserts itself (idempotent, checked by
+// id) every poll tick rather than once. Clicking it opens an M3-styled
+// modal with the DLL's recent log lines, refreshed on every tick so it
+// stays current even while open.
+static void CdpInjectSettingsLogRow(const std::string& logBlobUtf8) {
     std::string logJs = JsStrEscape(logBlobUtf8);
     std::string js =
         "(function(){"
         "var LOG='" + logJs + "';"
-        "var pre=document.getElementById('ymhub-log-text');"
-        "if(pre){pre.textContent=LOG||'(пока нет записей)';"
-        "if(pre.closest('#ymhub-log-modal').style.display!=='none')pre.scrollTop=pre.scrollHeight;"
-        "return;}"
-        "var btn=document.createElement('div');btn.id='ymhub-log-badge';"
-        "btn.textContent='YM';"
-        "btn.style.cssText='position:fixed;right:18px;bottom:18px;z-index:999998;"
-        "width:36px;height:36px;border-radius:12px;background:#1D1B2A;color:#B7A6FF;"
-        "font:700 12px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;"
-        "cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4);opacity:.55;transition:opacity .2s ease;"
-        "border:1px solid rgba(182,166,255,.25);';"
-        "btn.onmouseenter=function(){btn.style.opacity='1';};"
-        "btn.onmouseleave=function(){btn.style.opacity='.55';};"
-        "var modal=document.createElement('div');modal.id='ymhub-log-modal';"
+        "var modal=document.getElementById('ymhub-log-modal');"
+        "if(!modal){"
+        "modal=document.createElement('div');modal.id='ymhub-log-modal';"
         "modal.style.cssText='position:fixed;inset:0;z-index:999999;display:none;"
         "align-items:center;justify-content:center;background:rgba(0,0,0,.55);';"
         "var card=document.createElement('div');"
@@ -363,18 +353,33 @@ static void CdpInjectLogBadge(const std::string& logBlobUtf8) {
         "[copyBtn,closeBtn].forEach(function(b){b.style.cssText="
         "'height:28px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);"
         "background:rgba(255,255,255,.06);color:#C9C4D0;font:600 12px system-ui,sans-serif;cursor:pointer;';});"
+        "var pre=document.createElement('pre');pre.id='ymhub-log-text';"
+        "pre.style.cssText='flex:1;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-word;"
+        "font:11px Consolas,monospace;color:#C9C4D0;background:#15131f;border-radius:12px;padding:12px;';"
         "copyBtn.onclick=function(){navigator.clipboard.writeText(pre.textContent).catch(function(){});};"
         "closeBtn.onclick=function(){modal.style.display='none';};"
         "actions.appendChild(copyBtn);actions.appendChild(closeBtn);"
         "head.appendChild(title);head.appendChild(actions);"
-        "var pre=document.createElement('pre');pre.id='ymhub-log-text';"
-        "pre.style.cssText='flex:1;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-word;"
-        "font:11px Consolas,monospace;color:#C9C4D0;background:#15131f;border-radius:12px;padding:12px;';"
-        "pre.textContent=LOG||'(пока нет записей)';"
         "card.appendChild(head);card.appendChild(pre);modal.appendChild(card);"
-        "btn.onclick=function(){modal.style.display='flex';pre.scrollTop=pre.scrollHeight;};"
         "modal.onclick=function(e){if(e.target===modal)modal.style.display='none';};"
-        "document.body.appendChild(btn);document.body.appendChild(modal);"
+        "document.body.appendChild(modal);"
+        "}"
+        "var pre=document.getElementById('ymhub-log-text');"
+        "pre.textContent=LOG||'(пока нет записей)';"
+        "if(modal.style.display!=='none')pre.scrollTop=pre.scrollHeight;"
+        "if(document.getElementById('ymhub-settings-row'))return;"
+        "var titleEl=[...document.querySelectorAll('[class*=SettingsListButtonItem_title]')]"
+        ".find(function(e){return e.textContent.trim()==='\\u041e \\u043f\\u0440\\u0438\\u043b\\u043e\\u0436\\u0435\\u043d\\u0438\\u0438';});"
+        "if(!titleEl)return;"
+        "var origRow=titleEl.closest('button');if(!origRow)return;"
+        "var row=origRow.cloneNode(true);row.id='ymhub-settings-row';"
+        "var t=row.querySelector('[class*=SettingsListButtonItem_title]');"
+        "if(t)t.textContent='Логи YMHub';"
+        "var d=row.querySelector('[class*=SettingsListButtonItem_description]');"
+        "if(d)d.textContent='\\u0414\\u0438\\u0430\\u0433\\u043d\\u043e\\u0441\\u0442\\u0438\\u043a\\u0430 \\u0438 \\u0436\\u0443\\u0440\\u043d\\u0430\\u043b \\u0441\\u043e\\u0431\\u044b\\u0442\\u0438\\u0439';"
+        "row.onclick=function(e){e.preventDefault();e.stopPropagation();"
+        "modal.style.display='flex';pre.scrollTop=pre.scrollHeight;};"
+        "origRow.insertAdjacentElement('afterend',row);"
         "})()";
     CdpRunJs(js);
 }
@@ -576,12 +581,12 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
     return 0;
 }
 
-// Keeps the floating log badge present and its content current. Runs
-// independently of CdpAnnounceThread so logs are visible even if the
-// initial connect/verify sequence above failed or is still retrying.
+// Keeps the Settings-page log row present (while Settings is open) and its
+// content current. Runs independently of CdpAnnounceThread so logs are
+// visible even if the initial connect/verify sequence above failed.
 static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
-        if (CdpEnsureConnected()) CdpInjectLogBadge(LogBlob());
+        if (CdpEnsureConnected()) CdpInjectSettingsLogRow(LogBlob());
         Sleep(2000);
     }
     return 0;
