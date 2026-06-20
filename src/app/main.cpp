@@ -335,6 +335,7 @@ static void BroadcastState(){
         L",\"dllLoaded\":"+(dll?L"true":L"false")+
         L",\"overlayVisible\":"+(g_visible?L"true":L"false")+
         L",\"pos\":"+std::to_wstring((int)g_pos)+
+        L",\"ver\":\"" YMHUB_VERSION_W L"\""
         L"}";
     if(g_wv)    g_wv->PostWebMessageAsString(msg.c_str());
     if(g_hubWv) g_hubWv->PostWebMessageAsString(msg.c_str());}
@@ -617,19 +618,46 @@ static void ApplyUpdateAndRestart(const std::wstring& newExePath){
         CloseHandle(pi.hProcess);CloseHandle(pi.hThread);}
     if(g_hwnd)PostMessageW(g_hwnd,WM_CLOSE,0,0);}
 
-static void CheckForUpdate(){
+// WebView2's ICoreWebView2 is thread-affine to the UI thread that created
+// it — calling PostWebMessageAsString from a background thread silently
+// does nothing. So the background update-check thread only stashes the
+// result here and posts WM_APP+33; the actual PostWebMessageAsString call
+// happens in WndProc, on the UI thread.
+static std::wstring g_updState, g_updLatest;
+static void BroadcastUpdateStatus(const wchar_t* state,const std::wstring& latest=L""){
+    std::wstring msg=
+        L"{\"type\":\"update-status\",\"state\":\""+std::wstring(state)+L"\""
+        L",\"current\":\"" YMHUB_VERSION_W L"\""
+        L",\"latest\":\""+JsonEsc(latest)+L"\"}";
+    if(g_hubWv)g_hubWv->PostWebMessageAsString(msg.c_str());}
+
+static void PostUpdateStatus(const wchar_t* state,const std::wstring& latest=L""){
+    g_updState=state;g_updLatest=latest;
+    if(g_hwnd)PostMessageW(g_hwnd,WM_APP+33,0,0);}
+
+// manual=true (the "Проверить обновления" button) pushes status updates
+// to the hub UI at every step; the periodic background check stays quiet
+// unless it actually finds and applies something.
+static void CheckForUpdate(bool manual=false){
+    if(manual)PostUpdateStatus(L"checking");
     std::string body;
     std::wstring path=L"/repos/" YMHUB_REPO_W L"/releases/latest";
-    if(!HttpsGet(L"api.github.com",path.c_str(),body))return;
+    if(!HttpsGet(L"api.github.com",path.c_str(),body)){
+        if(manual)PostUpdateStatus(L"error");return;}
     std::wstring tag,assetUrl;
-    if(!ParseLatestRelease(body,tag,assetUrl))return;
+    if(!ParseLatestRelease(body,tag,assetUrl)){
+        if(manual)PostUpdateStatus(L"error");return;}
     std::wstring latest=tag;
     if(!latest.empty()&&(latest[0]==L'v'||latest[0]==L'V'))latest=latest.substr(1);
-    if(VerCompare(YMHUB_VERSION_W,latest)>=0)return; // already current or newer
+    if(VerCompare(YMHUB_VERSION_W,latest)>=0){
+        if(manual)PostUpdateStatus(L"latest",latest);
+        return;} // already current or newer
 
+    if(manual)PostUpdateStatus(L"installing",latest);
     wchar_t tmpDir[MAX_PATH];GetTempPathW(MAX_PATH,tmpDir);
     std::wstring newPath=std::wstring(tmpDir)+L"YMHub_update.exe";
-    if(!HttpsDownloadToFile(assetUrl,newPath))return;
+    if(!HttpsDownloadToFile(assetUrl,newPath)){
+        if(manual)PostUpdateStatus(L"error");return;}
     ApplyUpdateAndRestart(newPath);}
 
 // ── Media / commands ──────────────────────────────────────
@@ -1158,6 +1186,11 @@ html,body{width:100%;height:100%;overflow:hidden;
         <path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/>
       </svg>
     </button>
+    <button class='nav-btn' id='nav-about' onclick='nav("about")' title='О приложении'>
+      <svg width='19' height='19' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>
+        <circle cx='12' cy='12' r='10'/><line x1='12' y1='16' x2='12' y2='11'/><circle cx='12' cy='8' r='.5' fill='currentColor'/>
+      </svg>
+    </button>
     <div id='dll-dot'></div>
   </nav>
 
@@ -1289,6 +1322,43 @@ html,body{width:100%;height:100%;overflow:hidden;
           <div class='sdot' id='ovl-dot'></div>
           <div class='stxt' id='ovl-txt'>Скрыт</div>
           <button class='pc-btn' id='ovl-plug-btn' onclick='send("overlay-toggle")'>Показать</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── About tab ── -->
+    <div class='tab' id='tab-about'>
+      <div class='tab-title'>О приложении</div>
+      <div class='tab-sub'>Версия, обновления и информация</div>
+
+      <div class='plugin-card'>
+        <div class='pc-head'>
+          <div class='pc-icon blue'>♪</div>
+          <div>
+            <div class='pc-name'>YMHub</div>
+            <div class='pc-desc'>Оверлей-плеер, горячие клавиши и фоновая синхронизация для Яндекс Музыки</div>
+          </div>
+        </div>
+        <div class='pc-row'>
+          <div class='stxt'>Версия: <b id='about-ver'>—</b></div>
+        </div>
+        <div class='pc-row'>
+          <div class='sdot' id='upd-dot'></div>
+          <div class='stxt' id='upd-txt'>Нажмите, чтобы проверить обновления</div>
+          <button class='pc-btn primary' id='upd-btn' onclick='checkUpdate()'>Проверить обновления</button>
+        </div>
+      </div>
+
+      <div class='plugin-card'>
+        <div class='pc-head'>
+          <div class='pc-icon violet'>ℹ</div>
+          <div>
+            <div class='pc-name'>Репозиторий</div>
+            <div class='pc-desc'>Исходный код и релизы на GitHub</div>
+          </div>
+        </div>
+        <div class='pc-row'>
+          <div class='stxt'>github.com/onemorefix1337/ymhub</div>
         </div>
       </div>
     </div>
@@ -1464,11 +1534,26 @@ document.addEventListener('keydown',e=>{
   setTimeout(()=>{rb.style.color='';rb.style.borderColor='';stopRec();},900);});
 document.addEventListener('keyup',e=>{if(recording>=0&&e.keyCode===27)stopRec();});
 
+// About / updater
+function checkUpdate(){
+  $('upd-btn').disabled=true;
+  $('upd-dot').className='sdot';
+  $('upd-txt').textContent='Проверка...';
+  send('check-update');
+}
+
 // Messages
 window.chrome.webview.addEventListener('message',e=>{
   const d=JSON.parse(e.data);
-  if(d.type==='state'){updateState(d);return;}
-  if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);}
+  if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
+  if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
+  if(d.type==='update-status'){
+    if(d.current)$('about-ver').textContent=d.current;
+    if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
+    else if(d.state==='latest'){$('upd-dot').className='sdot ok';$('upd-txt').textContent='У вас последняя версия';$('upd-btn').disabled=false;}
+    else if(d.state==='installing'){$('upd-txt').textContent='Скачивание версии '+d.latest+'…';}
+    else if(d.state==='error'){$('upd-dot').className='sdot err';$('upd-txt').textContent='Ошибка проверки обновлений';$('upd-btn').disabled=false;}
+    return;}
 });
 
 buildRows();
@@ -1542,6 +1627,7 @@ static void InitWebView(){
                                 else if(msg==L"overlay-toggle") PostMessageW(g_hwnd,WM_APP+20,0,0);
                                 else if(msg==L"inject")   PostMessageW(g_hwnd,WM_APP+32,0,0);
                                 else if(msg==L"close")    PostMessageW(g_hub,WM_CLOSE,0,0);
+                                else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
                                 else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
                                 else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
                                 else if(msg.rfind(L"pos:",0)==0){
@@ -1665,6 +1751,8 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
         return 0;
     case WM_APP+32: // inject from hub
         TryInject();Sleep(500);BroadcastState();return 0;
+    case WM_APP+33: // updater status from background thread → UI thread
+        BroadcastUpdateStatus(g_updState.c_str(),g_updLatest);return 0;
     case WM_APP+3:
         EnterCriticalSection(&g_artCS);
         if(g_artReady.load()){g_artB64=g_artPending;g_artPending.clear();g_artReady=false;}
