@@ -28,7 +28,6 @@ jobs:
         run: |
           mkdir release
           copy build\bin\Release\YMHub.exe release\YMHub.exe
-          copy build\bin\Release\YMHubDll.dll release\YMHubDll.dll
         shell: cmd
 
       - name: Create release
@@ -36,5 +35,4 @@ jobs:
         with:
           files: |
             release/YMHub.exe
-            release/YMHubDll.dll
           generate_release_notes: true
