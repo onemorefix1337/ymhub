@@ -651,9 +651,25 @@ static void PostUpdateStatus(const wchar_t* state,const std::wstring& latest=L""
     g_updState=state;g_updLatest=latest;
     if(g_hwnd)PostMessageW(g_hwnd,WM_APP+33,0,0);}
 
+// An update that's been found but not yet confirmed by the user — stashed
+// here so the "confirm-update" message (sent after the hub shows its
+// blurred warning dialog and the user clicks "Обновить") doesn't need to
+// re-fetch the release info.
+static std::wstring g_pendingUpdateUrl, g_pendingUpdateVer;
+
+static void InstallPendingUpdate(){
+    if(g_pendingUpdateUrl.empty())return;
+    PostUpdateStatus(L"installing",g_pendingUpdateVer);
+    wchar_t tmpDir[MAX_PATH];GetTempPathW(MAX_PATH,tmpDir);
+    std::wstring newPath=std::wstring(tmpDir)+L"YMHub_update.exe";
+    if(!HttpsDownloadToFile(g_pendingUpdateUrl,newPath)){
+        PostUpdateStatus(L"error");return;}
+    ApplyUpdateAndRestart(newPath);}
+
 // manual=true (the "Проверить обновления" button) pushes status updates
-// to the hub UI at every step; the periodic background check stays quiet
-// unless it actually finds and applies something.
+// to the hub UI at every step. Either way, finding an update never installs
+// it silently — it always surfaces a "found" status so the hub can show its
+// blurred confirmation dialog and wait for the user to approve the install.
 static void CheckForUpdate(bool manual=false){
     if(manual)PostUpdateStatus(L"checking");
     std::string body;
@@ -669,12 +685,8 @@ static void CheckForUpdate(bool manual=false){
         if(manual)PostUpdateStatus(L"latest",latest);
         return;} // already current or newer
 
-    if(manual)PostUpdateStatus(L"installing",latest);
-    wchar_t tmpDir[MAX_PATH];GetTempPathW(MAX_PATH,tmpDir);
-    std::wstring newPath=std::wstring(tmpDir)+L"YMHub_update.exe";
-    if(!HttpsDownloadToFile(assetUrl,newPath)){
-        if(manual)PostUpdateStatus(L"error");return;}
-    ApplyUpdateAndRestart(newPath);}
+    g_pendingUpdateUrl=assetUrl;g_pendingUpdateVer=latest;
+    PostUpdateStatus(L"found",latest);}
 
 // ── Media / commands ──────────────────────────────────────
 static void SendCmd(DWORD cmd){
@@ -1180,6 +1192,40 @@ html,body{width:100%;height:100%;overflow:hidden;
 .pc-btn.primary{background:linear-gradient(135deg,var(--ac),var(--ac2));border:none;color:#fff;font-weight:600;}
 .pc-btn.primary:hover{filter:brightness(1.1);}
 .pc-btn:disabled{opacity:.35;cursor:default;pointer-events:none;}
+
+/* ── Update confirmation modal ── */
+#upd-scrim{
+  position:fixed;inset:0;z-index:100;display:none;
+  align-items:center;justify-content:center;
+  background:rgba(8,8,14,.45);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  opacity:0;transition:opacity .25s ease;
+}
+#upd-scrim.show{display:flex;opacity:1;}
+#upd-modal{
+  width:280px;border-radius:20px;padding:22px 20px 18px;
+  background:#1d1b2a;border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 16px 48px rgba(0,0,0,.5);
+  transform:scale(.9) translateY(8px);transition:transform .25s ease;
+}
+#upd-scrim.show #upd-modal{transform:scale(1) translateY(0);}
+#upd-modal-icon{
+  width:44px;height:44px;border-radius:14px;margin-bottom:14px;
+  background:linear-gradient(135deg,var(--ac),var(--ac2));
+  display:flex;align-items:center;justify-content:center;font-size:20px;
+  box-shadow:0 4px 16px rgba(91,143,255,.35);
+}
+#upd-modal-title{font-size:15px;font-weight:600;margin-bottom:6px;color:rgba(255,255,255,.92);}
+#upd-modal-sub{font-size:12.5px;line-height:1.5;color:rgba(255,255,255,.5);margin-bottom:18px;}
+#upd-modal-actions{display:flex;justify-content:flex-end;gap:8px;}
+.upd-btn2{
+  height:32px;padding:0 16px;border-radius:9px;border:none;
+  font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s;
+}
+.upd-btn2.ghost{background:transparent;color:rgba(255,255,255,.5);}
+.upd-btn2.ghost:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.8);}
+.upd-btn2.go{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;}
+.upd-btn2.go:hover{filter:brightness(1.1);}
+.upd-btn2:disabled{opacity:.4;cursor:default;pointer-events:none;}
 </style></head>
 <body>
 <div id='app'>
@@ -1381,6 +1427,19 @@ html,body{width:100%;height:100%;overflow:hidden;
 
   </main>
 </div>
+
+<div id='upd-scrim'>
+  <div id='upd-modal'>
+    <div id='upd-modal-icon'>↑</div>
+    <div id='upd-modal-title'>Доступно обновление</div>
+    <div id='upd-modal-sub'></div>
+    <div id='upd-modal-actions'>
+      <button class='upd-btn2 ghost' id='upd-modal-later' onclick='dismissUpdate()'>Позже</button>
+      <button class='upd-btn2 go' id='upd-modal-go' onclick='confirmUpdate()'>Обновить</button>
+    </div>
+  </div>
+</div>
+
 <canvas id='cv' style='display:none' width='200' height='200'></canvas>
 <script>
 const send = a => window.chrome.webview.postMessage(a);
@@ -1558,6 +1617,23 @@ function checkUpdate(){
   send('check-update');
 }
 
+function showUpdateModal(latest){
+  $('upd-modal-sub').textContent='Версия '+latest+' доступна для установки. Приложение скачает обновление, перезапустится и сделает это автоматически.';
+  $('upd-modal-go').disabled=false;$('upd-modal-go').textContent='Обновить';
+  $('upd-modal-later').style.display='';
+  $('upd-scrim').classList.add('show');
+}
+function dismissUpdate(){
+  $('upd-scrim').classList.remove('show');
+  $('upd-txt').textContent='Найдено обновление';$('upd-btn').disabled=false;
+}
+function confirmUpdate(){
+  $('upd-modal-go').disabled=true;$('upd-modal-go').textContent='Установка...';
+  $('upd-modal-later').style.display='none';
+  $('upd-modal-sub').textContent='Скачивание и установка обновления, приложение перезапустится автоматически…';
+  send('confirm-update');
+}
+
 // Messages
 window.chrome.webview.addEventListener('message',e=>{
   const d=JSON.parse(e.data);
@@ -1567,8 +1643,16 @@ window.chrome.webview.addEventListener('message',e=>{
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
     else if(d.state==='latest'){$('upd-dot').className='sdot ok';$('upd-txt').textContent='У вас последняя версия';$('upd-btn').disabled=false;}
+    else if(d.state==='found'){$('upd-dot').className='sdot ok';$('upd-txt').textContent='Найдено обновление: '+d.latest;$('upd-btn').disabled=false;showUpdateModal(d.latest);}
     else if(d.state==='installing'){$('upd-txt').textContent='Скачивание версии '+d.latest+'…';}
-    else if(d.state==='error'){$('upd-dot').className='sdot err';$('upd-txt').textContent='Ошибка проверки обновлений';$('upd-btn').disabled=false;}
+    else if(d.state==='error'){
+      $('upd-dot').className='sdot err';$('upd-txt').textContent='Ошибка проверки обновлений';$('upd-btn').disabled=false;
+      if($('upd-scrim').classList.contains('show')){
+        $('upd-modal-sub').textContent='Не удалось установить обновление. Попробуйте ещё раз позже.';
+        $('upd-modal-go').disabled=false;$('upd-modal-go').textContent='Повторить';
+        $('upd-modal-later').style.display='';
+      }
+    }
     return;}
 });
 
@@ -1644,6 +1728,7 @@ static void InitWebView(){
                                 else if(msg==L"inject")   PostMessageW(g_hwnd,WM_APP+32,0,0);
                                 else if(msg==L"close")    PostMessageW(g_hub,WM_CLOSE,0,0);
                                 else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
+                                else if(msg==L"confirm-update") std::thread([](){InstallPendingUpdate();}).detach();
                                 else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
                                 else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
                                 else if(msg.rfind(L"pos:",0)==0){
