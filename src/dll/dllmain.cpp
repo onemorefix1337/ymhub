@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <winhttp.h>
 #include <string>
+#include <vector>
+#include <mutex>
 #include <cstdlib>
 #include <cstdio>
 #include "../shared/ipc.h"
@@ -78,6 +80,55 @@ static std::string CdpUtf8(const wchar_t* w) {
     std::string s(len - 1, 0);
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), len, nullptr, nullptr);
     return s;
+}
+
+// ── In-memory log, surfaced via a floating "YMHub" badge injected into
+// YM's own page (see LogBadgeThread) so the user can see what the DLL is
+// doing without attaching a debugger. Also mirrored to a file in %TEMP%
+// so logs survive across injections.
+static std::mutex g_logMx;
+static std::vector<std::string> g_log;
+static void LogMsg(const std::string& s) {
+    SYSTEMTIME t; GetLocalTime(&t);
+    char ts[16]; sprintf_s(ts, "%02d:%02d:%02d ", t.wHour, t.wMinute, t.wSecond);
+    std::string line = ts + s;
+    {
+        std::lock_guard<std::mutex> lk(g_logMx);
+        g_log.push_back(line);
+        if (g_log.size() > 300) g_log.erase(g_log.begin());
+    }
+    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+    std::wstring path = std::wstring(tmp) + L"YMHubDll.log";
+    HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(f, 0, nullptr, FILE_END);
+    std::string l = line + "\r\n"; DWORD w = 0;
+    WriteFile(f, l.data(), (DWORD)l.size(), &w, nullptr);
+    CloseHandle(f);
+}
+static std::string LogBlob() {
+    std::lock_guard<std::mutex> lk(g_logMx);
+    std::string r;
+    for (auto& l : g_log) { r += l; r += "\n"; }
+    return r;
+}
+
+// Escapes text for embedding inside a single-quoted JS string literal
+// (the log content itself, as opposed to CdpJsonEscape which escapes the
+// JS *source* for the outer JSON request).
+static std::string JsStrEscape(const std::string& s) {
+    std::string r;
+    for (unsigned char c : s) {
+        switch (c) {
+        case '\'': r += "\\'"; break;
+        case '\\': r += "\\\\"; break;
+        case '\n': r += "\\n"; break;
+        case '\r': break;
+        default: r += (char)c;
+        }
+    }
+    return r;
 }
 
 static std::string CdpJsonEscape(const std::string& s) {
@@ -271,6 +322,63 @@ static void CdpShowStage3Error(const wchar_t* message) {
     CdpRunJs(CdpUtf8(js.c_str()));
 }
 
+// A small fixed-position "YM" badge in the bottom-right corner of YM's own
+// window, present the whole session. Clicking it opens an M3-styled modal
+// with the DLL's recent log lines — there's no reliable way to anchor a
+// row inside YM's own (unversioned, undocumented) Settings page, so this
+// floating badge is the stable alternative. Idempotent: only builds the
+// DOM once, then just refreshes the log text each call so it stays current
+// even while the modal is open.
+static void CdpInjectLogBadge(const std::string& logBlobUtf8) {
+    std::string logJs = JsStrEscape(logBlobUtf8);
+    std::string js =
+        "(function(){"
+        "var LOG='" + logJs + "';"
+        "var pre=document.getElementById('ymhub-log-text');"
+        "if(pre){pre.textContent=LOG||'(пока нет записей)';"
+        "if(pre.closest('#ymhub-log-modal').style.display!=='none')pre.scrollTop=pre.scrollHeight;"
+        "return;}"
+        "var btn=document.createElement('div');btn.id='ymhub-log-badge';"
+        "btn.textContent='YM';"
+        "btn.style.cssText='position:fixed;right:18px;bottom:18px;z-index:999998;"
+        "width:36px;height:36px;border-radius:12px;background:#1D1B2A;color:#B7A6FF;"
+        "font:700 12px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;"
+        "cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.4);opacity:.55;transition:opacity .2s ease;"
+        "border:1px solid rgba(182,166,255,.25);';"
+        "btn.onmouseenter=function(){btn.style.opacity='1';};"
+        "btn.onmouseleave=function(){btn.style.opacity='.55';};"
+        "var modal=document.createElement('div');modal.id='ymhub-log-modal';"
+        "modal.style.cssText='position:fixed;inset:0;z-index:999999;display:none;"
+        "align-items:center;justify-content:center;background:rgba(0,0,0,.55);';"
+        "var card=document.createElement('div');"
+        "card.style.cssText='width:560px;max-height:70vh;display:flex;flex-direction:column;"
+        "background:#1D1B2A;border-radius:20px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.5);';"
+        "var head=document.createElement('div');"
+        "head.style.cssText='display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;';"
+        "var title=document.createElement('div');title.textContent='Логи YMHub';"
+        "title.style.cssText='font:700 15px system-ui,sans-serif;color:#E6E1E9;';"
+        "var actions=document.createElement('div');actions.style.cssText='display:flex;gap:8px;';"
+        "var copyBtn=document.createElement('button');copyBtn.textContent='Копировать';"
+        "var closeBtn=document.createElement('button');closeBtn.textContent='Закрыть';"
+        "[copyBtn,closeBtn].forEach(function(b){b.style.cssText="
+        "'height:28px;padding:0 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);"
+        "background:rgba(255,255,255,.06);color:#C9C4D0;font:600 12px system-ui,sans-serif;cursor:pointer;';});"
+        "copyBtn.onclick=function(){navigator.clipboard.writeText(pre.textContent).catch(function(){});};"
+        "closeBtn.onclick=function(){modal.style.display='none';};"
+        "actions.appendChild(copyBtn);actions.appendChild(closeBtn);"
+        "head.appendChild(title);head.appendChild(actions);"
+        "var pre=document.createElement('pre');pre.id='ymhub-log-text';"
+        "pre.style.cssText='flex:1;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-word;"
+        "font:11px Consolas,monospace;color:#C9C4D0;background:#15131f;border-radius:12px;padding:12px;';"
+        "pre.textContent=LOG||'(пока нет записей)';"
+        "card.appendChild(head);card.appendChild(pre);modal.appendChild(card);"
+        "btn.onclick=function(){modal.style.display='flex';pre.scrollTop=pre.scrollHeight;};"
+        "modal.onclick=function(e){if(e.target===modal)modal.style.display='none';};"
+        "document.body.appendChild(btn);document.body.appendChild(modal);"
+        "})()";
+    CdpRunJs(js);
+}
+
 // Confirms the actual player UI is present (not just that CDP is reachable)
 // before declaring success — checks for the like button in EITHER of its
 // two states ("Нравится" / "Не нравится", depending on whether the current
@@ -279,7 +387,7 @@ static void CdpShowStage3Error(const wchar_t* message) {
 // Retries for a few seconds since the page can still be hydrating right
 // after a fresh launch.
 static bool CdpVerifyPlayerReady() {
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
         if (i > 0) Sleep(500);
         std::string req =
             "{\"id\":5,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":"
@@ -337,8 +445,8 @@ static void ExecCmd(DWORD cmd) {
     }
 
     // Like/dislike via CDP — works regardless of OS focus
-    if (cmd == YMHC_LIKE)    { CdpClickButton(L"Нравится"); return; }
-    if (cmd == YMHC_DISLIKE) { CdpClickButton(L"Не нравится"); return; }
+    if (cmd == YMHC_LIKE)    { LogMsg("Like clicked"); CdpClickButton(L"Нравится"); return; }
+    if (cmd == YMHC_DISLIKE) { LogMsg("Dislike clicked"); CdpClickButton(L"Не нравится"); return; }
 
     HWND main = FindMainWnd();
     if (!main) return;
@@ -455,14 +563,27 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
 // finishing the relaunch-with-flag dance at this point): checking ->
 // success, or checking -> error if the page isn't the player we expect.
 static DWORD WINAPI CdpAnnounceThread(LPVOID) {
+    LogMsg("Connecting to CDP on port " + std::to_string(CdpPort()) + "...");
     for (int i = 0; i < 30 && g_run; i++) {
         if (CdpEnsureConnected()) break;
         Sleep(500);
     }
-    if (!g_cdpWs) return 0; // never got a connection — nothing to draw into
+    if (!g_cdpWs) { LogMsg("CDP connect failed after 30 attempts"); return 0; }
+    LogMsg("CDP connected");
     CdpShowStage1Checking();
-    if (CdpVerifyPlayerReady()) CdpShowStage2Success();
-    else CdpShowStage3Error(L"Не удалось найти плеер Яндекс Музыки");
+    if (CdpVerifyPlayerReady()) { LogMsg("Player ready"); CdpShowStage2Success(); }
+    else { LogMsg("Player not found"); CdpShowStage3Error(L"Не удалось найти плеер Яндекс Музыки"); }
+    return 0;
+}
+
+// Keeps the floating log badge present and its content current. Runs
+// independently of CdpAnnounceThread so logs are visible even if the
+// initial connect/verify sequence above failed or is still retrying.
+static DWORD WINAPI LogBadgeThread(LPVOID) {
+    while (g_run) {
+        if (CdpEnsureConnected()) CdpInjectLogBadge(LogBlob());
+        Sleep(2000);
+    }
     return 0;
 }
 
@@ -479,7 +600,9 @@ static DWORD WINAPI WorkerThread(LPVOID) {
 
     // Advertise DLL presence via named mutex
     g_mutex = CreateMutexW(nullptr, TRUE, YMH_MUTEX_NAME);
+    LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
     CreateThread(nullptr, 0, CdpAnnounceThread, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, LogBadgeThread, nullptr, 0, nullptr);
 
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;
