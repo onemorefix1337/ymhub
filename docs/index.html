@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YMHub — оверлей и хаб для Яндекс Музыки</title>
+<link rel="icon" href="favicon.ico">
+<meta name="description" content="YMHub — компактный мини-плеер поверх всех окон, горячие клавиши и фоновое управление Яндекс Музыкой.">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --ac:#5b8fff;--ac2:#7c6fff;--bg:#0d0d14;--sb:#09090e;
+  --card:rgba(255,255,255,.05);--bord:rgba(255,255,255,.08);
+  --txt:rgba(255,255,255,.92);--txt2:rgba(255,255,255,.55);--txt3:rgba(255,255,255,.35);
+}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--txt);
+  background-image:radial-gradient(circle at 18% -10%,rgba(91,143,255,.16),transparent 45%),
+    radial-gradient(circle at 85% 0%,rgba(124,111,255,.12),transparent 40%);
+}
+
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  max-width:980px;margin:0 auto;padding:28px 24px 0;
+}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px}
+.brand .logo{
+  width:30px;height:30px;border-radius:9px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--ac),var(--ac2));
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+  box-shadow:0 4px 16px rgba(91,143,255,.35);
+}
+header a{color:var(--txt2);text-decoration:none;font-size:13.5px;font-weight:600;transition:color .15s}
+header a:hover{color:var(--txt)}
+
+.hero{max-width:980px;margin:0 auto;padding:90px 24px 50px;text-align:center}
+.hero .pill{
+  display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:99px;
+  background:var(--card);border:1px solid var(--bord);color:var(--txt2);
+  font-size:12.5px;font-weight:600;margin-bottom:28px;
+}
+.hero .pill .dot{width:6px;height:6px;border-radius:50%;background:#3ddc84;box-shadow:0 0 7px rgba(61,220,132,.6)}
+.hero h1{
+  font-size:clamp(34px,6vw,58px);font-weight:800;line-height:1.08;letter-spacing:-.5px;
+  background:linear-gradient(135deg,#fff 40%,var(--ac2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero p{
+  max-width:560px;margin:22px auto 0;color:var(--txt2);font-size:16.5px;line-height:1.6;
+}
+.cta{display:flex;gap:14px;justify-content:center;margin-top:36px;flex-wrap:wrap}
+.btn{
+  display:inline-flex;align-items:center;gap:9px;height:48px;padding:0 26px;border-radius:14px;
+  font-weight:700;font-size:14.5px;text-decoration:none;transition:all .15s;
+}
+.btn.primary{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;
+  box-shadow:0 8px 28px rgba(91,143,255,.35);}
+.btn.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn.ghost{background:var(--card);border:1px solid var(--bord);color:var(--txt)}
+.btn.ghost:hover{border-color:rgba(91,143,255,.4);color:var(--ac)}
+.req{margin-top:16px;color:var(--txt3);font-size:12.5px}
+
+.preview{max-width:760px;margin:10px auto 0;padding:0 24px}
+.preview .frame{
+  border-radius:20px;border:1px solid var(--bord);background:linear-gradient(160deg,#13121c,#0c0c12);
+  padding:18px;box-shadow:0 30px 70px rgba(0,0,0,.5);
+}
+.preview .titlebar{display:flex;gap:7px;padding:2px 4px 14px}
+.preview .titlebar span{width:10px;height:10px;border-radius:50%;background:rgba(255,255,255,.12)}
+.preview .row{display:flex;align-items:center;gap:14px;padding:12px;border-radius:14px;background:rgba(255,255,255,.03)}
+.preview .cover{
+  width:46px;height:46px;border-radius:10px;flex-shrink:0;
+  background:linear-gradient(135deg,#ff5fa2,#7c6fff);
+}
+.preview .meta{flex:1;text-align:left}
+.preview .meta b{font-size:14px;display:block}
+.preview .meta span{font-size:12px;color:var(--txt3)}
+.preview .ctrl{display:flex;gap:10px;color:var(--txt2)}
+.preview .ctrl .play{
+  width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--ac),var(--ac2));
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;
+}
+
+.section{max-width:980px;margin:0 auto;padding:70px 24px}
+.section h2{font-size:28px;font-weight:800;text-align:center;letter-spacing:-.3px}
+.section .sub{text-align:center;color:var(--txt2);margin-top:10px;font-size:15px}
+
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:42px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.card{
+  background:var(--card);border:1px solid var(--bord);border-radius:18px;padding:22px;
+  transition:border-color .2s,transform .2s;
+}
+.card:hover{border-color:rgba(91,143,255,.3);transform:translateY(-2px)}
+.card .ico{
+  width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  font-size:17px;margin-bottom:14px;background:rgba(91,143,255,.15);
+}
+.card h3{font-size:15px;font-weight:700;margin-bottom:7px}
+.card p{font-size:13px;color:var(--txt2);line-height:1.55}
+
+.steps{max-width:680px;margin:42px auto 0;display:flex;flex-direction:column;gap:14px}
+.step{display:flex;gap:16px;align-items:flex-start;padding:16px;border-radius:14px;background:var(--card);border:1px solid var(--bord)}
+.step .n{
+  width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--ac),var(--ac2));
+  color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.step b{font-size:14px;display:block;margin-bottom:3px}
+.step span{font-size:13px;color:var(--txt2)}
+
+footer{max-width:980px;margin:0 auto;padding:50px 24px 60px;text-align:center;color:var(--txt3);font-size:12.5px}
+footer a{color:var(--txt2);text-decoration:none}
+footer a:hover{color:var(--ac)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><div class="logo">♪</div>YMHub</div>
+  <a href="https://github.com/onemorefix1337/ymhub" target="_blank" rel="noopener">GitHub →</a>
+</header>
+
+<section class="hero">
+  <div class="pill"><span class="dot"></span>Open source · Windows</div>
+  <h1>Яндекс Музыка,<br>но с панелью управления</h1>
+  <p>Компактный мини-плеер поверх всех окон, горячие клавиши и фоновое
+     управление воспроизведением — без переключения на основное окно.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/onemorefix1337/ymhub/releases/latest/download/YMHub.exe">⬇ Скачать YMHub.exe</a>
+    <a class="btn ghost" href="https://github.com/onemorefix1337/ymhub/releases">Все релизы</a>
+  </div>
+  <div class="req">Windows 10/11 · один файл · автообновление · бесплатно</div>
+</section>
+
+<div class="preview">
+  <div class="frame">
+    <div class="titlebar"><span></span><span></span><span></span></div>
+    <div class="row">
+      <div class="cover"></div>
+      <div class="meta"><b>Anatomy (hardstyle remix)</b><span>TEENWXVE, askat</span></div>
+      <div class="ctrl">
+        <span>♡</span>
+        <div class="play">▶</div>
+        <span>⋯</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section class="section">
+  <h2>Что внутри</h2>
+  <p class="sub">Один exe, без установщика, без рекламы</p>
+  <div class="grid">
+    <div class="card">
+      <div class="ico">🎴</div>
+      <h3>Мини-плеер оверлей</h3>
+      <p>Компактный виджет с обложкой, названием трека и управлением — можно закрепить в любом углу экрана.</p>
+    </div>
+    <div class="card">
+      <div class="ico">⌨</div>
+      <h3>Горячие клавиши</h3>
+      <p>Play/Pause, следующий трек, лайк/дизлайк — настраиваются под себя и работают даже без фокуса окна.</p>
+    </div>
+    <div class="card">
+      <div class="ico">❤</div>
+      <h3>Лайк/дизлайк в фоне</h3>
+      <p>Клик отправляется напрямую в страницу через DevTools Protocol — переключаться на Яндекс Музыку не нужно.</p>
+    </div>
+    <div class="card">
+      <div class="ico">↻</div>
+      <h3>Автообновление</h3>
+      <p>Проверяет новые версии на GitHub и предупреждает перед установкой — без скачивания вручную.</p>
+    </div>
+    <div class="card">
+      <div class="ico">📦</div>
+      <h3>Один файл</h3>
+      <p>Никаких лишних DLL рядом — всё нужное упаковано прямо в YMHub.exe.</p>
+    </div>
+    <div class="card">
+      <div class="ico">🛠</div>
+      <h3>Диагностика</h3>
+      <p>Логи работы видны прямо в настройках Яндекс Музыки — без отдельных программ и консолей.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Как начать</h2>
+  <div class="steps">
+    <div class="step"><div class="n">1</div><div><b>Скачайте YMHub.exe</b><span>Один файл, ничего распаковывать не нужно.</span></div></div>
+    <div class="step"><div class="n">2</div><div><b>Запустите рядом с Яндекс Музыкой</b><span>YMHub сам подключится и настроит всё необходимое.</span></div></div>
+    <div class="step"><div class="n">3</div><div><b>Настройте горячие клавиши</b><span>В окне хаба — на вкладке «Горячие клавиши».</span></div></div>
+  </div>
+</section>
+
+<footer>
+  YMHub — независимый проект, не связан с «Яндексом».<br>
+  <a href="https://github.com/onemorefix1337/ymhub" target="_blank" rel="noopener">github.com/onemorefix1337/ymhub</a>
+</footer>
+
+</body>
+</html>
