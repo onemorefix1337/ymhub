@@ -499,7 +499,7 @@ static void CdpSendYmKey(DWORD idx) {
 // and idempotent, so it's safe to re-run on every LogBadgeThread tick as
 // well as immediately on toggle (WorkerThread's tweaksSeq watch), which
 // keeps it self-healing across YM's own SPA re-renders.
-static const char* kTweakSelectors[5] = {
+static const char* kTweakSelectors[6] = {
     "[class*='VibePage_words__']",      // AI-комментарии о треке
     "[data-test-id='VIBE_ANIMATION']",  // анимация фона плеера
     "[class*='MainPage_betaSlot__']",   // плашка "версия приложения"
@@ -509,15 +509,23 @@ static const char* kTweakSelectors[5] = {
                                          // itself), so hiding this also re-centers
                                          // the player for free via flex redistribution
     "[class*='MainPage_feedbackForm__']", // плашка "Моя волна обновилась"
+    "[data-test-id='NAVBAR_NAVIGATION_ITEM_FOR_YOU_AND_TRENDS'],"
+    "[data-test-id='NAVBAR_NAVIGATION_ITEM_CONCERTS'],"
+    "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']", // лишние разделы меню
 };
-static void CdpApplyTweaks(DWORD mask) {
+static void CdpApplyTweaks(DWORD mask, DWORD hueDeg) {
     if (!CdpEnsureConnected()) return;
     std::string css;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         if (mask & (1u << i)) {
             css += kTweakSelectors[i];
             css += "{display:none!important;}";
         }
+    }
+    if (hueDeg) {
+        char buf[96];
+        sprintf_s(buf, "[data-test-id='VIBE_ANIMATION']{filter:hue-rotate(%udeg)!important;}", hueDeg % 360);
+        css += buf;
     }
     std::string js =
         "(function(){var s=document.getElementById('ymhub-tweaks-style');"
@@ -535,21 +543,21 @@ static void ExecCmd(DWORD cmd) {
         return;
     }
 
-    // Like/dislike via CDP — works regardless of OS focus
+    // Like/dislike/prev/next via CDP — works regardless of OS focus. YM's
+    // Electron main process doesn't actually act on WM_APPCOMMAND PREVIOUS/
+    // NEXTTRACK (confirmed empirically — track never changed), unlike
+    // PLAY_PAUSE which Windows also drives through SMTC independently of
+    // our message, which is why only that one appeared to "work" before.
     if (cmd == YMHC_LIKE)    { LogMsg("Like clicked"); CdpClickButton(L"Нравится"); return; }
     if (cmd == YMHC_DISLIKE) { LogMsg("Dislike clicked"); CdpClickButton(L"Не нравится"); return; }
+    if (cmd == YMHC_PREV)    { LogMsg("Prev clicked"); CdpClickButton(L"Предыдущая песня"); return; }
+    if (cmd == YMHC_NEXT)    { LogMsg("Next clicked"); CdpClickButton(L"Следующая песня"); return; }
 
     HWND main = FindMainWnd();
     if (!main) return;
 
     // Media commands via WM_APPCOMMAND — no focus needed
     switch (cmd) {
-    case YMHC_PREV:
-        PostMessageW(main, WM_APPCOMMAND, (WPARAM)main,
-            MAKELPARAM(0, APPCOMMAND_MEDIA_PREVIOUSTRACK)); return;
-    case YMHC_NEXT:
-        PostMessageW(main, WM_APPCOMMAND, (WPARAM)main,
-            MAKELPARAM(0, APPCOMMAND_MEDIA_NEXTTRACK)); return;
     case YMHC_TOGGLE:
         PostMessageW(main, WM_APPCOMMAND, (WPARAM)main,
             MAKELPARAM(0, APPCOMMAND_MEDIA_PLAY_PAUSE)); return;
@@ -599,6 +607,10 @@ static void RefreshHotkeys() {
         if (vk) {
             UINT mods = HostToWinMods(g_ipc->keys[i].mods);
             g_regIds[i] = !!RegisterHotKey(g_hkWnd, i, mods, vk);
+            char b[96];
+            sprintf_s(b, "RegisterHotKey id=%d mods=%u vk=%u -> %s (err=%lu)",
+                i, mods, vk, g_regIds[i] ? "ok" : "FAIL", g_regIds[i] ? 0 : GetLastError());
+            LogMsg(b);
         }
     }
 }
@@ -606,6 +618,7 @@ static void RefreshHotkeys() {
 static LRESULT CALLBACK HotkeyWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_HOTKEY) {
         int id = (int)(short)LOWORD(wp);
+        { char b[32]; sprintf_s(b, "WM_HOTKEY id=%d", id); LogMsg(b); }
         if (id >= 0 && id < 6 && (!g_ipc || !g_ipc->rebinding)) {
             static const DWORD cmds[6] = {
                 YMHC_OVL_TOGGLE, YMHC_PREV, YMHC_NEXT,
@@ -674,7 +687,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
-            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask);
+            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->bgHueDeg);
         }
         Sleep(2000);
     }
@@ -733,7 +746,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         LONG ts = InterlockedCompareExchange(&g_ipc->tweaksSeq, 0, 0);
         if (ts != g_lastTweaksSeq) {
             g_lastTweaksSeq = ts;
-            CdpApplyTweaks(g_ipc->tweaksMask);
+            CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->bgHueDeg);
         }
         Sleep(15);
     }

@@ -64,6 +64,11 @@ struct YMHubIPC {
     // and doesn't touch YM's own state/behavior, just what's rendered.
     volatile LONG  tweaksSeq;
     volatile DWORD tweaksMask;
+
+    // Host -> DLL: player background tint, applied as a CSS hue-rotate
+    // filter on the Vibe animation canvas. Degrees 0-359; same tweaksSeq
+    // covers this too since it's applied together with tweaksMask.
+    volatile DWORD bgHueDeg;
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakSelectors order in
@@ -74,7 +79,8 @@ enum {
     TWEAK_RELEASE_PIN = 2, // Плашка "Версия приложения" / что нового
     TWEAK_WHEEL       = 3, // Барабан рекомендаций слева (плейлисты-карточки)
     TWEAK_WAVE_PILL   = 4, // Плашка "Моя волна обновилась" в углу
-    TWEAK_COUNT       = 5,
+    TWEAK_EXTRA_NAV   = 5, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
+    TWEAK_COUNT       = 6,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table

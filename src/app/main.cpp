@@ -170,13 +170,20 @@ static void SaveYmKeys(){
 
 // "Твики" hub tab — UI declutter toggles (see TWEAK_* in shared/ipc.h).
 static DWORD g_tweaksMask=0;
-static void LoadTweaks(){g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);}
+static DWORD g_bgHue=0;
+static void LoadTweaks(){
+    g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);
+    g_bgHue=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"TweaksHue",0);}
 static void PushTweaksToIPC(){
     if(!g_ipc)return;
     g_ipc->tweaksMask=g_tweaksMask;
+    g_ipc->bgHueDeg=g_bgHue;
     InterlockedIncrement(&g_ipc->tweaksSeq);}
 static void SaveTweaks(){
     RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
+    PushTweaksToIPC();}
+static void SaveBgHue(){
+    RegSetDW(HKEY_CURRENT_USER,REG_APP,L"TweaksHue",g_bgHue);
     PushTweaksToIPC();}
 
 // Default VK codes for YM's own "Горячие клавиши", in the same order as
@@ -410,8 +417,8 @@ static void SendHubYmKeys(){
 
 static void SendHubTweaks(){
     if(!g_hubWv)return;
-    wchar_t buf[64];
-    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u}",g_tweaksMask);
+    wchar_t buf[96];
+    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u,\"hue\":%u}",g_tweaksMask,g_bgHue);
     g_hubWv->PostWebMessageAsString(buf);}
 
 // ── IPC / DLL injection ───────────────────────────────────
@@ -1247,14 +1254,14 @@ html,body{width:100%;height:100%;overflow:hidden;
   height:32px;padding:0 18px;border-radius:8px;border:none;
   font-family:inherit;font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s;
 }
-#kbtn-reset{background:rgba(255,255,255,.07);color:var(--txt2);}
-#kbtn-reset:hover{background:rgba(255,255,255,.12);color:#fff;}
-#kbtn-save{
+#kbtn-reset,#ymkbtn-reset{background:rgba(255,255,255,.07);color:var(--txt2);}
+#kbtn-reset:hover,#ymkbtn-reset:hover{background:rgba(255,255,255,.12);color:#fff;}
+#kbtn-save,#ymkbtn-save{
   background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;
   box-shadow:0 3px 12px rgba(91,143,255,.3);
 }
-#kbtn-save:hover{filter:brightness(1.1);}
-#kbtn-save:active{filter:brightness(.9);transform:scale(.97);}
+#kbtn-save:hover,#ymkbtn-save:hover{filter:brightness(1.1);}
+#kbtn-save:active,#ymkbtn-save:active{filter:brightness(.9);transform:scale(.97);}
 
 /* ── Plugins tab ── */
 .plugin-card{
@@ -1297,14 +1304,26 @@ html,body{width:100%;height:100%;overflow:hidden;
 .tw-switch{
   position:relative;width:38px;height:22px;flex-shrink:0;border-radius:99px;
   background:rgba(255,255,255,.12);border:1px solid var(--bord);
-  cursor:pointer;transition:background .2s,border-color .2s;
+  cursor:pointer;transition:background .35s ease,border-color .35s ease,box-shadow .35s ease;
 }
-.tw-switch.on{background:linear-gradient(135deg,var(--ac),var(--ac2));border-color:transparent;}
+.tw-switch.on{
+  background:linear-gradient(135deg,var(--ac),var(--ac2));border-color:transparent;
+  box-shadow:0 0 10px rgba(91,143,255,.45);
+}
+.tw-switch:active{transform:scale(.93);}
 .tw-switch .knob{
   position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
-  background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.4);
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);
+  transition:left .35s cubic-bezier(.34,1.56,.64,1);
 }
 .tw-switch.on .knob{left:18px;}
+.hue-swatches{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;max-width:220px;}
+.hue-dot{
+  width:26px;height:26px;border-radius:50%;cursor:pointer;flex-shrink:0;
+  border:2px solid transparent;transition:transform .15s,border-color .15s;
+}
+.hue-dot:hover{transform:scale(1.12);}
+.hue-dot.on{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.15);}
 
 /* ── Update confirmation modal ── */
 #upd-scrim{
@@ -1520,6 +1539,10 @@ html,body{width:100%;height:100%;overflow:hidden;
       <div class='tab-title'>Твики</div>
       <div class='tab-sub'>Скрыть отдельные элементы интерфейса Яндекс Музыки — применяется сразу</div>
       <div id='tweak-rows'></div>
+      <div class='tw-row' style='align-items:flex-start'>
+        <div class='tw-lbl'><div class='tw-name'>Цвет фона плеера</div><div class='tw-desc'>Оттенок анимированного фона «Моей волны»</div></div>
+        <div id='hue-swatches' class='hue-swatches'></div>
+      </div>
     </div>
 
     <!-- ── About tab ── -->
@@ -1721,7 +1744,8 @@ const TWEAK_INFO=[
   {n:'Анимация фона плеера',d:'Цветной волновой фон Моей волны'},
   {n:'Плашка «Версия приложения»',d:'Кнопка с заметками о новой версии'},
   {n:'Барабан рекомендаций',d:'Карточки плейлистов слева — плеер займёт всю ширину'},
-  {n:'Плашка «Моя волна обновилась»',d:'Уведомление в правом верхнем углу'}
+  {n:'Плашка «Моя волна обновилась»',d:'Уведомление в правом верхнем углу'},
+  {n:'Лишние разделы меню',d:'«Для вас и Тренды», «Концерты», «Книги и подкасты»'}
 ];
 let tweaksMask=0;
 function renderTweaks(){
@@ -1733,6 +1757,18 @@ function renderTweaks(){
       <div class='tw-switch${on?' on':''}' id='tws${i}' onclick='toggleTweak(${i})'><div class='knob'></div></div>`;
     cont.appendChild(row);});}
 function toggleTweak(i){send('toggle-tweak:'+i);}
+
+const HUE_PRESETS=[0,60,120,180,240,300];
+let bgHue=0;
+function renderHueSwatches(){
+  const cont=$('hue-swatches');if(!cont)return;cont.innerHTML='';
+  HUE_PRESETS.forEach(deg=>{
+    const dot=document.createElement('div');
+    dot.className='hue-dot'+(bgHue===deg?' on':'');
+    dot.style.background=`hsl(${(180+deg)%360},65%,55%)`;
+    dot.title=deg===0?'Стандартный':`+${deg}°`;
+    dot.onclick=()=>send('set-bg-hue:'+deg);
+    cont.appendChild(dot);});}
 
 function buildRows(){
   const cont=$('key-rows');cont.innerHTML='';
@@ -1866,7 +1902,7 @@ window.chrome.webview.addEventListener('message',e=>{
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
   if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
-  if(d.type==='init-tweaks'){tweaksMask=d.mask;renderTweaks();return;}
+  if(d.type==='init-tweaks'){tweaksMask=d.mask;bgHue=d.hue||0;renderTweaks();renderHueSwatches();return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -1887,6 +1923,7 @@ window.chrome.webview.addEventListener('message',e=>{
 buildRows();
 buildYmRows();
 renderTweaks();
+renderHueSwatches();
 </script>
 </body></html>)HUB";
 
@@ -1988,9 +2025,12 @@ static void InitWebView(){
                                         SaveYmKeys();SendHubYmKeys();}}
                                 else if(msg.rfind(L"toggle-tweak:",0)==0){
                                     int idx=_wtoi(msg.c_str()+13);
-                                    if(idx>=0&&idx<5){
+                                    if(idx>=0&&idx<6){
                                         g_tweaksMask^=(1u<<idx);
-                                        SaveTweaks();SendHubTweaks();}}}
+                                        SaveTweaks();SendHubTweaks();}}
+                                else if(msg.rfind(L"set-bg-hue:",0)==0){
+                                    int hue=_wtoi(msg.c_str()+11);
+                                    if(hue>=0&&hue<360){g_bgHue=(DWORD)hue;SaveBgHue();SendHubTweaks();}}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(
