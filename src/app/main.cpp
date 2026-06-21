@@ -506,6 +506,31 @@ static void KillAllByExeName(const wchar_t* exeName){
         }while(Process32NextW(snap,&pe));}
     CloseHandle(snap);}
 
+// Kills and relaunches YM (plain, no --remote-debugging-port) so the new
+// YMHub instance's own EnsureDebugPort/TryInject cycle injects the fresh
+// DLL right away, instead of leaving the old DLL loaded in YM's process
+// until the user happens to restart YM on their own. No-op if YM wasn't
+// running at all — nothing to refresh, and we shouldn't start it.
+static void RestartYM(){
+    HWND ym=FindYM();if(!ym)return;
+    DWORD pid=0;GetWindowThreadProcessId(ym,&pid);if(!pid)return;
+    std::wstring exePath;
+    HANDLE hProc=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(hProc){
+        wchar_t buf[MAX_PATH];DWORD sz=MAX_PATH;
+        if(QueryFullProcessImageNameW(hProc,0,buf,&sz))exePath.assign(buf,sz);
+        CloseHandle(hProc);}
+    if(exePath.empty())return;
+    const wchar_t* exeName=PathFindFileNameW(exePath.c_str());
+    KillAllByExeName(exeName);
+    Sleep(1500);
+    STARTUPINFOW si{};si.cb=sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd=L"\""+exePath+L"\"";
+    std::wstring cmdMut=cmd;
+    if(CreateProcessW(nullptr,cmdMut.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)){
+        CloseHandle(pi.hProcess);CloseHandle(pi.hThread);}}
+
 // Pick a port for --remote-debugging-port: reuse one that's already
 // serving valid CDP (port==0 means "search from YM_CDP_PORT"), otherwise
 // scan forward from the default for the first genuinely free port.
@@ -681,6 +706,7 @@ static void ApplyUpdateAndRestart(const std::wstring& newExePath){
     std::wstring cmdMut=cmd;
     if(CreateProcessW(nullptr,cmdMut.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)){
         CloseHandle(pi.hProcess);CloseHandle(pi.hThread);}
+    RestartYM(); // so the new YMHub injects its fresh DLL right away
     if(g_hwnd)PostMessageW(g_hwnd,WM_CLOSE,0,0);}
 
 // WebView2's ICoreWebView2 is thread-affine to the UI thread that created
