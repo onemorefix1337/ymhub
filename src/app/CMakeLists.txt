@@ -1,5 +1,9 @@
 if(NOT DEFINED WV2_SDK)
-    set(WV2_SDK "C:/Users/User/claude/ymplayer/webview2sdk")
+    message(FATAL_ERROR
+        "WV2_SDK is not set. Point it at an extracted Microsoft.Web.WebView2 "
+        "NuGet package, e.g.:\n"
+        "  nuget install Microsoft.Web.WebView2 -Version 1.0.2592.51 -OutputDirectory webview2sdk\n"
+        "  cmake -S . -B build -A x64 -DWV2_SDK=\"<path>\\webview2sdk\\Microsoft.Web.WebView2.1.0.2592.51\"")
 endif()
 
 set(RC_FILE "${CMAKE_CURRENT_BINARY_DIR}/dll_embed.rc")
