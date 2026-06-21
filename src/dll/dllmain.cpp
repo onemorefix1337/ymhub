@@ -514,36 +514,47 @@ static void CdpSendYmKey(DWORD idx) {
     CdpSend(buf); CdpRecv(resp);
 }
 
-// "Твики" hub tab — bit i in tweaksMask hides whatever matches
-// kTweakSelectors[i] (see TWEAK_* in shared/ipc.h). Pure CSS, injected via
-// a single persistent <style> tag rebuilt from the current mask — cheap
-// and idempotent, so it's safe to re-run on every LogBadgeThread tick as
-// well as immediately on toggle (WorkerThread's tweaksSeq watch), which
-// keeps it self-healing across YM's own SPA re-renders.
-static const char* kTweakSelectors[7] = {
-    "[class*='VibePage_words__']",      // AI-комментарии о треке
-    "[data-test-id='VIBE_ANIMATION']",  // анимация фона плеера
-    "[class*='MainPage_betaSlot__']",   // плашка "версия приложения"
-    "[class*='VibePage_wheel__']",      // барабан рекомендаций слева — VibePage_root
+// "Твики" hub tab — bit i in tweaksMask injects kTweakRules[i] verbatim
+// (see TWEAK_* in shared/ipc.h). Each entry is a complete CSS rule (or
+// several), not just a bare selector, so most are a plain hide
+// ("{display:none!important}") but a tweak can just as well resize or
+// restyle something instead. Injected via a single persistent <style>
+// tag rebuilt from the current mask — cheap and idempotent, so it's safe
+// to re-run on every LogBadgeThread tick as well as immediately on toggle
+// (WorkerThread's tweaksSeq watch), which keeps it self-healing across
+// YM's own SPA re-renders.
+static const char* kTweakRules[8] = {
+    "[class*='VibePage_words__']{display:none!important;}",      // AI-комментарии о треке
+    "[data-test-id='VIBE_ANIMATION']{display:none!important;}",  // анимация фона плеера
+    "[class*='MainPage_betaSlot__']{display:none!important;}",   // плашка "версия приложения"
+    "[class*='VibePage_wheel__']{display:none!important;}",      // барабан рекомендаций слева — VibePage_root
                                          // is a flex row with the player block as
                                          // the other child (already centered within
                                          // itself), so hiding this also re-centers
                                          // the player for free via flex redistribution
-    "[class*='MainPage_feedbackForm__']", // плашка "Моя волна обновилась"
+    "[class*='MainPage_feedbackForm__']{display:none!important;}", // плашка "Моя волна обновилась"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_FOR_YOU_AND_TRENDS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_CONCERTS'],"
-    "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']", // лишние разделы меню
+    "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']{display:none!important;}", // лишние разделы меню
     "[data-test-id='USER_PROFILE_PLUS_LINK'],"
-    "[data-test-id='USER_PROFILE_PLUS_BADGE']", // плюс-бейдж в профиле
+    "[data-test-id='USER_PROFILE_PLUS_BADGE']{display:none!important;}", // плюс-бейдж в профиле
+    // крупная обложка трека — coverContainer/link/img are all exactly
+    // 80x80 and sized in lockstep (the link is position:absolute;inset:0
+    // inside coverContainer, the img fills the link), so growing all
+    // three together to the same size needs no overflow/clipping fixes.
+    // The parent column (VibePlayerBar_root__) is flex+align-items:center
+    // with the cover as its first child, so a taller cover just pushes
+    // the progress bar/controls below it down — no overlap.
+    "[class*='AlbumCover_coverContainer__'],"
+    "[class*='AlbumCover_link__'],"
+    "[class*='AlbumCover_cover__']{width:152px!important;height:152px!important;}"
+    "[class*='AlbumCover_cover__']{border-radius:16px!important;}",
 };
 static void CdpApplyTweaks(DWORD mask) {
     if (!CdpEnsureConnected()) return;
     std::string css;
-    for (int i = 0; i < 7; i++) {
-        if (mask & (1u << i)) {
-            css += kTweakSelectors[i];
-            css += "{display:none!important;}";
-        }
+    for (int i = 0; i < 8; i++) {
+        if (mask & (1u << i)) css += kTweakRules[i];
     }
     std::string js =
         "(function(){var s=document.getElementById('ymhub-tweaks-style');"

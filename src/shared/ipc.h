@@ -72,7 +72,7 @@ struct YMHubIPC {
     volatile DWORD ymLiked;
 };
 
-// Bit indices into YMHubIPC::tweaksMask — matches kTweakSelectors order in
+// Bit indices into YMHubIPC::tweaksMask — matches kTweakRules order in
 // dllmain.cpp and the row order in the hub's "Твики" tab.
 enum {
     TWEAK_AI_WORDS    = 0, // AI-комментарии о треке (искра под плеером)
@@ -82,7 +82,8 @@ enum {
     TWEAK_WAVE_PILL   = 4, // Плашка "Моя волна обновилась" в углу
     TWEAK_EXTRA_NAV   = 5, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
     TWEAK_PLUS_BADGE  = 6, // ссылка/плашка подписки Плюс рядом с именем профиля
-    TWEAK_COUNT       = 7,
+    TWEAK_BIG_COVER   = 7, // крупная обложка трека на странице "Моя волна"
+    TWEAK_COUNT       = 8,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table
