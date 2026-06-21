@@ -64,6 +64,12 @@ struct YMHubIPC {
     // and doesn't touch YM's own state/behavior, just what's rendered.
     volatile LONG  tweaksSeq;
     volatile DWORD tweaksMask;
+
+    // DLL -> host: real liked state of the current track, polled from YM's
+    // own DOM every ~2s (see CdpQueryLiked in dllmain.cpp) — covers likes
+    // made outside the hub's own optimistic toggle (YM's native UI,
+    // remapped hotkeys, or a track that was already liked on load).
+    volatile DWORD ymLiked;
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakSelectors order in

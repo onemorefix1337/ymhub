@@ -438,6 +438,27 @@ static bool CdpExtractXY(const std::string& resp, double& x, double& y) {
     return true;
 }
 
+// Polled from LogBadgeThread to keep the hub/mini-player heart icon in
+// sync with the real liked state — covers likes done from YM's own UI,
+// remapped native hotkeys, or a track that was already liked before the
+// hub started, none of which go through DoLike()'s optimistic toggle.
+// aria-pressed on the main player's "Нравится" button is the one place
+// this is reliably exposed (confirmed empirically: false -> true the
+// instant a like lands, same button identity as CdpClickButton above).
+static bool CdpQueryLiked() {
+    if (!CdpEnsureConnected()) return false;
+    std::string label = CdpUtf8(L"Нравится");
+    std::string expr =
+        "(function(){var b=document.querySelector(\"button[aria-label='" + label +
+        "']\");return b?b.getAttribute('aria-pressed')==='true':false;})()";
+    std::string req = "{\"id\":6,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
+        CdpJsonEscape(expr) + "\",\"returnByValue\":true}}";
+    if (!CdpSend(req)) { CdpClose(); return false; }
+    std::string resp;
+    if (!CdpRecv(resp)) { CdpClose(); return false; }
+    return resp.find("\"value\":true") != std::string::npos;
+}
+
 static void CdpClickButton(const wchar_t* ariaLabel) {
     if (!CdpEnsureConnected()) return;
     std::string label = CdpUtf8(ariaLabel); // plain text, no special chars to escape
@@ -682,7 +703,10 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
-            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask);
+            if (g_ipc) {
+                CdpApplyTweaks(g_ipc->tweaksMask);
+                g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
+            }
         }
         Sleep(2000);
     }

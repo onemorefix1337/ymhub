@@ -316,6 +316,7 @@ static volatile bool g_parsing=false;
 static void ParseYMWork(){
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     HWND hw=g_hwnd;
+    bool justChangedTrack=false;
     try{
         auto mgrOp=wmc::GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
         auto mgr=AwaitOrTimeout(mgrOp,1500);
@@ -333,7 +334,7 @@ static void ParseYMWork(){
                     g_playing=(ym.GetPlaybackInfo().PlaybackStatus()==
                         wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
                     bool changed=(g_artTrackKey!=track);
-                    if(changed){g_artTrackKey=track;g_artB64="";g_liked=false;}
+                    if(changed){g_artTrackKey=track;g_artB64="";g_liked=false;justChangedTrack=true;}
                     // Retry every poll while art is still missing for the
                     // current track — SMTC's Thumbnail() is sometimes not
                     // populated yet on the very first poll after a track
@@ -345,6 +346,15 @@ static void ParseYMWork(){
             }
         }
     }catch(...){}
+    // Resync with the DLL's real (DOM-polled) liked state — corrects the
+    // optimistic toggle in DoLike()/DoDislike() if it ever drifts, and
+    // picks up likes made outside the hub entirely (YM's own UI, remapped
+    // native hotkeys, or a track that was already liked on load). Skipped
+    // right on a track change: the DLL polls every ~2s independently, so
+    // ymLiked can still hold the *previous* track's state for up to that
+    // long — applying it here would flash the old status before the DLL
+    // catches up, instead of the correct assume-unliked default above.
+    if(g_ipc&&!justChangedTrack)g_liked=(g_ipc->ymLiked!=0);
     g_parsing=false;
     if(hw)PostMessageW(hw,WM_APP+27,0,0);}
 
