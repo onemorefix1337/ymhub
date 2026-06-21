@@ -544,11 +544,16 @@ static const char* kTweakRules[8] = {
     // three together to the same size needs no overflow/clipping fixes.
     // The parent column (VibePlayerBar_root__) is flex+align-items:center
     // with the cover as its first child, so a taller cover just pushes
-    // the progress bar/controls below it down — no overlap.
+    // the progress bar/controls below it down — no overlap there. But
+    // the cover sits in a layout slot (playerBlock) whose own box height
+    // doesn't grow with it, so a bigger cover bleeds upward out of that
+    // slot and starts overlapping the artist-name block above it —
+    // nudge that block up a bit so it clears the taller cover.
     "[class*='AlbumCover_coverContainer__'],"
     "[class*='AlbumCover_link__'],"
     "[class*='AlbumCover_cover__']{width:152px!important;height:152px!important;}"
-    "[class*='AlbumCover_cover__']{border-radius:16px!important;}",
+    "[class*='AlbumCover_cover__']{border-radius:16px!important;}"
+    "[class*='VibePage_entityMetaBody__']{transform:translateY(-24px)!important;}",
 };
 static void CdpApplyTweaks(DWORD mask) {
     if (!CdpEnsureConnected()) return;
