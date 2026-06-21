@@ -18,6 +18,7 @@ static YMHubIPC*     g_ipc        = nullptr;
 static HANDLE        g_mutex      = nullptr;
 static volatile bool g_run        = false;
 static LONG          g_lastCmdSeq = 0;
+static LONG          g_lastYmSendSeq = 0;
 
 // Hotkey thread state
 static HWND          g_hkWnd      = nullptr;
@@ -460,6 +461,37 @@ static void CdpClickButton(const wchar_t* ariaLabel) {
     CdpSend(buf); CdpRecv(resp);
 }
 
+// Default key for each YM_ACTION_* (see shared/ipc.h) — used to emit the
+// *original* key via CDP when the host's hook detects the user's remapped
+// key. Input.dispatchKeyEvent is trusted input as far as Chromium/Electron
+// is concerned (same as the Input.dispatchMouseEvent calls above, already
+// relied on for like/dislike), unlike page-JS-dispatched events or
+// SendInput, both of which were tried first and silently ignored.
+struct YmDefKey { const char* key; const char* code; int vk; };
+static const YmDefKey kYmDefKeys[13] = {
+    {"k","KeyK",75}, {"m","KeyM",77}, {"l","KeyL",76}, {"j","KeyJ",74},
+    {"ArrowUp","ArrowUp",38}, {"ArrowDown","ArrowDown",40},
+    {"f","KeyF",70}, {"d","KeyD",68}, {"r","KeyR",82}, {"s","KeyS",83},
+    {"n","KeyN",78}, {"p","KeyP",80}, {"w","KeyW",87},
+};
+static void CdpSendYmKey(DWORD idx) {
+    if (idx >= 13) return;
+    if (!CdpEnsureConnected()) return;
+    const YmDefKey& d = kYmDefKeys[idx];
+    char buf[384]; std::string resp;
+    sprintf_s(buf,
+        "{\"id\":4,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"keyDown\","
+        "\"key\":\"%s\",\"code\":\"%s\",\"windowsVirtualKeyCode\":%d,\"nativeVirtualKeyCode\":%d}}",
+        d.key, d.code, d.vk, d.vk);
+    if (!CdpSend(buf)) { CdpClose(); return; }
+    CdpRecv(resp);
+    sprintf_s(buf,
+        "{\"id\":4,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"keyUp\","
+        "\"key\":\"%s\",\"code\":\"%s\",\"windowsVirtualKeyCode\":%d,\"nativeVirtualKeyCode\":%d}}",
+        d.key, d.code, d.vk, d.vk);
+    CdpSend(buf); CdpRecv(resp);
+}
+
 // ── Command execution ───────────────────────────────────────────
 static void ExecCmd(DWORD cmd) {
     // Overlay toggle -> notify host
@@ -606,7 +638,9 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
 // visible even if the initial connect/verify sequence above failed.
 static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
-        if (CdpEnsureConnected()) CdpInjectSettingsLogRow(LogBlob());
+        if (CdpEnsureConnected()) {
+            CdpInjectSettingsLogRow(LogBlob());
+        }
         Sleep(2000);
     }
     return 0;
@@ -631,6 +665,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
 
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;
+    g_lastYmSendSeq = g_ipc->ymSendSeq;
 
     // Wait for hotkey window to be ready (up to 2 s), then do initial registration
     for (int i = 0; i < 200 && !g_hkWnd && g_run; i++) Sleep(10);
@@ -649,6 +684,13 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         if (ks != g_lastKeySeq) {
             g_lastKeySeq = ks;
             if (g_hkWnd) PostMessageW(g_hkWnd, WM_REFRESHHK, 0, 0);
+        }
+        // Host's keyboard hook detected a remapped YM hotkey — emit the
+        // original default key via CDP (see CdpSendYmKey above).
+        LONG ys = InterlockedCompareExchange(&g_ipc->ymSendSeq, 0, 0);
+        if (ys != g_lastYmSendSeq) {
+            g_lastYmSendSeq = ys;
+            CdpSendYmKey(g_ipc->ymSendIdx);
         }
         Sleep(15);
     }

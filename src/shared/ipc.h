@@ -41,4 +41,39 @@ struct YMHubIPC {
     // its CDP client instead of a hardcoded port, since the host may have
     // had to fall back to a different port if the default was busy.
     volatile DWORD cdpPort;
+
+    // Host -> DLL: "please send YM's default key for action ymSendIdx"
+    // (see YM_ACTION_* below). The host's own foreground-gated low-level
+    // keyboard hook (LLKeyProc/g_ymKeys in main.cpp) detects the user's
+    // remapped key and the suppression of a remapped-away default key —
+    // both of those work fine on real (non-injected) input. But actually
+    // *emitting* the translated key has to happen via the DLL's CDP
+    // connection using Input.dispatchKeyEvent, not host-side SendInput:
+    // Chromium/Electron only treats page-dispatched JS KeyboardEvents and
+    // SendInput-synthesized OS input as untrusted (confirmed empirically —
+    // neither toggled playback, while a real keypress and CDP's own
+    // Input.dispatchMouseEvent, already used for like/dislike, both work),
+    // whereas CDP's Input domain is explicitly trusted input as far as
+    // Chromium is concerned.
+    volatile LONG  ymSendSeq;
+    volatile DWORD ymSendIdx;
+};
+
+// Index order for YMHubIPC::ymSendIdx and the matching default-key table
+// in dllmain.cpp — mirrors YM's own "Горячие клавиши" list top to bottom.
+enum {
+    YM_ACTION_TOGGLE   = 0,  // play/pause       — default K
+    YM_ACTION_MUTE     = 1,  // mute/unmute      — default M
+    YM_ACTION_SEEK_FWD = 2,  // seek forward     — default L
+    YM_ACTION_SEEK_BCK = 3,  // seek backward    — default J
+    YM_ACTION_VOL_UP   = 4,  // volume up        — default ↑
+    YM_ACTION_VOL_DOWN = 5,  // volume down      — default ↓
+    YM_ACTION_LIKE     = 6,  // like             — default F
+    YM_ACTION_DISLIKE  = 7,  // dislike          — default D
+    YM_ACTION_REPEAT   = 8,  // toggle repeat    — default R
+    YM_ACTION_SHUFFLE  = 9,  // toggle shuffle   — default S
+    YM_ACTION_NEXT     = 10, // next track       — default N
+    YM_ACTION_PREV     = 11, // previous track   — default P
+    YM_ACTION_FULLSCR  = 12, // fullscreen player — default W
+    YM_ACTION_COUNT    = 13,
 };

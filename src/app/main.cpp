@@ -102,6 +102,10 @@ static HKey g_keys[6] = {
 };
 static bool g_rebinding = false;
 
+// YM's own native in-page hotkeys (see YM_ACTION_* in shared/ipc.h) —
+// {0,0} means "not remapped, use YM's own default key".
+static HKey g_ymKeys[13] = {};
+
 // ── Registry ─────────────────────────────────────────────
 static const wchar_t* REG_APP = L"Software\\YMHub";
 static const wchar_t* REG_RUN = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -151,6 +155,35 @@ static void SaveKeys(){
     for(int i=0;i<6;i++)
         RegSetDW(HKEY_CURRENT_USER,REG_APP,KEY_REG[i],(g_keys[i].mods<<16)|g_keys[i].vk);
     PushKeysToIPC();}
+
+static const wchar_t* YMKEY_REG[13]={
+    L"YmKey0",L"YmKey1",L"YmKey2",L"YmKey3",L"YmKey4",L"YmKey5",L"YmKey6",
+    L"YmKey7",L"YmKey8",L"YmKey9",L"YmKey10",L"YmKey11",L"YmKey12"};
+static void LoadYmKeys(){
+    for(int i=0;i<13;i++){
+        DWORD v=RegGetDW(HKEY_CURRENT_USER,REG_APP,YMKEY_REG[i],0);
+        g_ymKeys[i]={v>>16,v&0xFFFF};}
+}
+static void SaveYmKeys(){
+    for(int i=0;i<13;i++)
+        RegSetDW(HKEY_CURRENT_USER,REG_APP,YMKEY_REG[i],(g_ymKeys[i].mods<<16)|g_ymKeys[i].vk);}
+
+// Default VK codes for YM's own "Горячие клавиши", in the same order as
+// g_ymKeys/YM_ROW_INFO in the hub UI (play/pause, mute, seek fwd/back,
+// vol up/down, like, dislike, repeat, shuffle, next, prev, fullscreen).
+static const DWORD YM_DEFAULT_VK[13]={
+    'K','M','L','J',VK_UP,VK_DOWN,'F','D','R','S','N','P','W'};
+
+// SendInput-synthesized key events are silently ignored by YM/Electron
+// (confirmed empirically — neither toggled playback, while a real keypress
+// did), so the translated default key has to come from the DLL's CDP
+// connection via Input.dispatchKeyEvent instead. This just signals the
+// DLL which action's default key to send; WorkerThread in dllmain.cpp
+// polls ymSendSeq at ~15ms alongside the existing cmdSeq/keySeq fields.
+static void SendYmDefaultKey(int idx){
+    if(!g_ipc)return;
+    g_ipc->ymSendIdx=(DWORD)idx;
+    InterlockedIncrement(&g_ipc->ymSendSeq);}
 
 // ── Position helper ───────────────────────────────────────
 static void GetCardPos(int& x,int& y){
@@ -352,6 +385,16 @@ static void SendHubKeys(){
         g_keys[0].mods,g_keys[0].vk,g_keys[1].mods,g_keys[1].vk,
         g_keys[2].mods,g_keys[2].vk,g_keys[3].mods,g_keys[3].vk,
         g_keys[4].mods,g_keys[4].vk,g_keys[5].mods,g_keys[5].vk);
+    g_hubWv->PostWebMessageAsString(buf);}
+
+static void SendHubYmKeys(){
+    if(!g_hubWv)return;
+    wchar_t buf[768]=L"{\"type\":\"init-ymkeys\",\"keys\":[";
+    for(int i=0;i<13;i++){
+        wchar_t part[48];
+        swprintf_s(part,L"%s{\"m\":%u,\"v\":%u}",i?L",":L"",g_ymKeys[i].mods,g_ymKeys[i].vk);
+        wcscat_s(buf,part);}
+    wcscat_s(buf,L"]}");
     g_hubWv->PostWebMessageAsString(buf);}
 
 // ── IPC / DLL injection ───────────────────────────────────
@@ -1156,7 +1199,7 @@ html,body{width:100%;height:100%;overflow:hidden;
   animation:rdot .8s step-end infinite;}
 @keyframes rdot{0%,100%{opacity:1}50%{opacity:0}}
 .kr-div{height:1px;background:var(--bord);margin:2px;}
-#keys-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid var(--bord);}
+#keys-footer,#ymkeys-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid var(--bord);}
 .kf-btn{
   height:32px;padding:0 18px;border-radius:8px;border:none;
   font-family:inherit;font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s;
@@ -1355,6 +1398,14 @@ html,body{width:100%;height:100%;overflow:hidden;
       <div id='keys-footer'>
         <button class='kf-btn' id='kbtn-reset' onclick='resetKeys()'>По умолчанию</button>
         <button class='kf-btn' id='kbtn-save' onclick='saveKeys()'>Сохранить</button>
+      </div>
+
+      <div class='tab-title' style='margin-top:30px;font-size:16px;'>Встроенные клавиши Яндекс Музыки</div>
+      <div class='tab-sub'>Работают только когда окно Яндекс Музыки активно</div>
+      <div id='ymkey-rows'></div>
+      <div id='ymkeys-footer'>
+        <button class='kf-btn' id='ymkbtn-reset' onclick='resetYmKeys()'>По умолчанию</button>
+        <button class='kf-btn' id='ymkbtn-save' onclick='saveYmKeys()'>Сохранить</button>
       </div>
     </div>
 
@@ -1564,6 +1615,29 @@ const ROW_INFO=[
 let keys=DEF_KEYS.map(k=>({...k}));
 let recording=-1;
 
+// YM's own in-page hotkeys (only work while YM's window has focus — see
+// YM_ACTION_* in shared/ipc.h). {m:0,v:0} means "not remapped, use YM's
+// own default". DEF_YM_DISPLAY is only for the "default" chip shown when
+// a row hasn't been overridden — the host doesn't need to know it.
+const DEF_YM_DISPLAY=['K','M','L','J','↑','↓','F','D','R','S','N','P','W'];
+const YM_ROW_INFO=[
+  {a:'Пауза / Играть',s:'Переключить воспроизведение'},
+  {a:'Без звука',s:'Включить или выключить звук'},
+  {a:'Промотать вперёд',s:'Перемотка трека вперёд'},
+  {a:'Промотать назад',s:'Перемотка трека назад'},
+  {a:'Громче',s:'Увеличить громкость'},
+  {a:'Тише',s:'Уменьшить громкость'},
+  {a:'Лайк',s:'Добавить в понравившиеся'},
+  {a:'Дизлайк',s:'Не нравится'},
+  {a:'Повтор',s:'Переключить режим повтора'},
+  {a:'Шаффл',s:'Случайный порядок'},
+  {a:'Следующий трек',s:'Пропустить текущую песню'},
+  {a:'Предыдущий трек',s:'Вернуться к предыдущей песне'},
+  {a:'Полный экран',s:'Открыть / закрыть фулскрин плеер'}
+];
+let ymKeys=DEF_YM_DISPLAY.map(()=>({m:0,v:0}));
+let ymRecording=-1;
+
 function buildRows(){
   const cont=$('key-rows');cont.innerHTML='';
   for(let i=0;i<6;i++){
@@ -1605,6 +1679,56 @@ function stopRec(){
 function resetKeys(){keys=DEF_KEYS.map(k=>({...k}));for(let i=0;i<6;i++)renderCombo(i);stopRec();}
 function saveKeys(){stopRec();send('rebind:'+keys.map(k=>k.m+','+k.v).join(','));}
 
+function buildYmRows(){
+  const cont=$('ymkey-rows');cont.innerHTML='';
+  for(let i=0;i<13;i++){
+    if(i>0){const d=document.createElement('div');d.className='kr-div';cont.appendChild(d);}
+    const row=document.createElement('div');row.className='key-row';row.id='ymkr'+i;
+    row.innerHTML=`<div class='kr-lbl'><div class='kr-act'>${YM_ROW_INFO[i].a}</div><div class='kr-sub'>${YM_ROW_INFO[i].s}</div></div>
+      <div class='key-combo' id='ymkc${i}'></div>
+      <button class='rec-btn' id='ymrb${i}' onclick='startYmRec(${i})'>Изменить</button>`;
+    cont.appendChild(row);}
+  for(let i=0;i<13;i++)renderYmCombo(i);}
+
+function renderYmCombo(i){
+  const kc=$('ymkc'+i),key=ymKeys[i];kc.innerHTML='';
+  if(!key.v){kc.innerHTML=`<span class='knone'>по умолчанию (${DEF_YM_DISPLAY[i]})</span>`;return;}
+  const chips=[];
+  if(key.m&1)chips.push({t:'Ctrl',mod:true});
+  if(key.m&2)chips.push({t:'Shift',mod:true});
+  if(key.m&4)chips.push({t:'Alt',mod:true});
+  chips.push({t:VK[key.v]||('#'+key.v),mod:false});
+  chips.forEach((c,idx)=>{
+    if(idx>0){const s=document.createElement('span');s.className='kplus';s.textContent='+';kc.appendChild(s);}
+    const el=document.createElement('span');
+    el.className='kchip'+(c.mod?' mod':'');el.textContent=c.t;kc.appendChild(el);});}
+
+function startYmRec(i){
+  if(ymRecording===i){stopYmRec();return;}
+  stopYmRec();stopRec();ymRecording=i;
+  const rb=$('ymrb'+i);rb.classList.add('recording');
+  rb.innerHTML="<span class='rec-dot'></span>Нажмите...";
+  $('ymkc'+i).innerHTML='';send('rebind-start');}
+
+function stopYmRec(){
+  if(ymRecording>=0){
+    const rb=$('ymrb'+ymRecording);
+    rb.classList.remove('recording');rb.innerHTML='Изменить';
+    renderYmCombo(ymRecording);ymRecording=-1;send('rebind-end');}}
+
+function resetYmKeys(){ymKeys=DEF_YM_DISPLAY.map(()=>({m:0,v:0}));for(let i=0;i<13;i++)renderYmCombo(i);stopYmRec();}
+function saveYmKeys(){stopYmRec();send('ymrebind:'+ymKeys.map(k=>k.m+','+k.v).join(','));}
+
+document.addEventListener('keydown',e=>{
+  if(ymRecording<0)return;e.preventDefault();
+  if(MODS_VK.has(e.keyCode))return;
+  const mods=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0);
+  ymKeys[ymRecording]={m:mods,v:e.keyCode};renderYmCombo(ymRecording);
+  const rb=$('ymrb'+ymRecording);rb.classList.remove('recording');
+  rb.innerHTML='✓ Назначено';rb.style.color='#5bff8a';rb.style.borderColor='rgba(91,255,138,.4)';
+  setTimeout(()=>{rb.style.color='';rb.style.borderColor='';stopYmRec();},900);});
+document.addEventListener('keyup',e=>{if(ymRecording>=0&&e.keyCode===27)stopYmRec();});
+
 document.addEventListener('keydown',e=>{
   if(recording<0)return;e.preventDefault();
   if(MODS_VK.has(e.keyCode))return;
@@ -1645,6 +1769,7 @@ window.chrome.webview.addEventListener('message',e=>{
   const d=JSON.parse(e.data);
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
+  if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -1663,6 +1788,7 @@ window.chrome.webview.addEventListener('message',e=>{
 });
 
 buildRows();
+buildYmRows();
 </script>
 </body></html>)HUB";
 
@@ -1752,7 +1878,16 @@ static void InitWebView(){
                                         g_keys[0]={m0,v0};g_keys[1]={m1,v1};
                                         g_keys[2]={m2,v2};g_keys[3]={m3,v3};
                                         g_keys[4]={m4,v4};g_keys[5]={m5,v5};
-                                        SaveKeys();SendHubKeys();}}}
+                                        SaveKeys();SendHubKeys();}}
+                                else if(msg.rfind(L"ymrebind:",0)==0){
+                                    std::vector<DWORD> nums;
+                                    wchar_t* ctx=nullptr;
+                                    std::wstring rest=msg.substr(9);
+                                    wchar_t* tok=wcstok_s(rest.data(),L",",&ctx);
+                                    while(tok){nums.push_back((DWORD)_wtoi(tok));tok=wcstok_s(nullptr,L",",&ctx);}
+                                    if(nums.size()==26){
+                                        for(int i=0;i<13;i++)g_ymKeys[i]={nums[i*2],nums[i*2+1]};
+                                        SaveYmKeys();SendHubYmKeys();}}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(
@@ -1783,16 +1918,33 @@ static void ShowTrayMenu(){
 
 // ── Keyboard hook ─────────────────────────────────────────
 static LRESULT CALLBACK LLKeyProc(int code,WPARAM wp,LPARAM lp){
-    if(code==HC_ACTION&&(wp==WM_KEYDOWN||wp==WM_SYSKEYDOWN)&&!g_rebinding&&!IsDllLoaded()){
+    if(code==HC_ACTION&&(wp==WM_KEYDOWN||wp==WM_SYSKEYDOWN)&&!g_rebinding){
         auto* k=(KBDLLHOOKSTRUCT*)lp;
         bool ctrl=(GetAsyncKeyState(VK_CONTROL)&0x8000)!=0;
         bool sh  =(GetAsyncKeyState(VK_SHIFT)  &0x8000)!=0;
         bool alt =(GetAsyncKeyState(VK_MENU)   &0x8000)!=0;
         DWORD mods=(ctrl?1u:0u)|(sh?2u:0u)|(alt?4u:0u);
-        static const UINT wm[]={WM_APP+20,WM_APP+10,WM_APP+11,WM_APP+12,WM_APP+13,WM_APP+14};
-        for(int i=0;i<6;i++)
-            if(g_keys[i].vk&&mods==g_keys[i].mods&&k->vkCode==g_keys[i].vk)
-                {PostMessageW(g_hwnd,wm[i],0,0);return 1;}}
+        if(!IsDllLoaded()){
+            static const UINT wm[]={WM_APP+20,WM_APP+10,WM_APP+11,WM_APP+12,WM_APP+13,WM_APP+14};
+            for(int i=0;i<6;i++)
+                if(g_keys[i].vk&&mods==g_keys[i].mods&&k->vkCode==g_keys[i].vk)
+                    {PostMessageW(g_hwnd,wm[i],0,0);return 1;}}
+        // YM's own native hotkeys (Горячие клавиши) — only act while YM's
+        // own window is foreground. Detection/suppression happens here
+        // (real, non-injected input), but the actual translated keypress
+        // has to be emitted by the DLL via CDP — see SendYmDefaultKey.
+        {
+            static HWND s_ymWin=nullptr;static ULONGLONG s_ymTick=0;
+            ULONGLONG now=GetTickCount64();
+            if(now-s_ymTick>500){s_ymWin=FindYM();s_ymTick=now;}
+            if(s_ymWin&&GetForegroundWindow()==s_ymWin){
+                for(int i=0;i<13;i++)
+                    if(g_ymKeys[i].vk&&mods==g_ymKeys[i].mods&&k->vkCode==g_ymKeys[i].vk)
+                        {SendYmDefaultKey(i);return 1;}
+                if(mods==0)
+                    for(int i=0;i<13;i++)
+                        if(k->vkCode==YM_DEFAULT_VK[i]&&g_ymKeys[i].vk&&g_ymKeys[i].vk!=YM_DEFAULT_VK[i])
+                            return 1;}}}
     return CallNextHookEx(g_hook,code,wp,lp);}
 
 // ── Timers ────────────────────────────────────────────────
@@ -1852,7 +2004,7 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
         return 0;
     case WM_APP+25: ParseYM();BroadcastState();return 0;
     case WM_APP+26: // hub nav complete → send initial state + keys
-        ParseYM();BroadcastState();SendHubKeys();return 0;
+        ParseYM();BroadcastState();SendHubKeys();SendHubYmKeys();return 0;
     case WM_APP+31: // pos change from hub
         {int n=(int)wp;if(n>=0&&n<=5){
             g_pos=(Pos)n;
@@ -1900,6 +2052,7 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     }).detach();
 
     LoadKeys();
+    LoadYmKeys();
     InitIPC();
     g_pos=(Pos)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Pos",(DWORD)Pos::BC);
     if((int)g_pos<0||(int)g_pos>5)g_pos=Pos::BC;
