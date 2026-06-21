@@ -6,3 +6,4 @@ build/
 *.dll
 .vs/
 out/
+.claude/
