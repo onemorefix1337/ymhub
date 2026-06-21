@@ -499,15 +499,21 @@ static void CdpSendYmKey(DWORD idx) {
 // and idempotent, so it's safe to re-run on every LogBadgeThread tick as
 // well as immediately on toggle (WorkerThread's tweaksSeq watch), which
 // keeps it self-healing across YM's own SPA re-renders.
-static const char* kTweakSelectors[3] = {
+static const char* kTweakSelectors[5] = {
     "[class*='VibePage_words__']",      // AI-комментарии о треке
     "[data-test-id='VIBE_ANIMATION']",  // анимация фона плеера
     "[class*='MainPage_betaSlot__']",   // плашка "версия приложения"
+    "[class*='VibePage_wheel__']",      // барабан рекомендаций слева — VibePage_root
+                                         // is a flex row with the player block as
+                                         // the other child (already centered within
+                                         // itself), so hiding this also re-centers
+                                         // the player for free via flex redistribution
+    "[class*='MainPage_feedbackForm__']", // плашка "Моя волна обновилась"
 };
 static void CdpApplyTweaks(DWORD mask) {
     if (!CdpEnsureConnected()) return;
     std::string css;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 5; i++) {
         if (mask & (1u << i)) {
             css += kTweakSelectors[i];
             css += "{display:none!important;}";

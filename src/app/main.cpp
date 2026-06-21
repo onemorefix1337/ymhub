@@ -1719,7 +1719,9 @@ let ymRecording=-1;
 const TWEAK_INFO=[
   {n:'AI-комментарии о треке',d:'Подсказка со искрой под плеером'},
   {n:'Анимация фона плеера',d:'Цветной волновой фон Моей волны'},
-  {n:'Плашка «Версия приложения»',d:'Кнопка с заметками о новой версии'}
+  {n:'Плашка «Версия приложения»',d:'Кнопка с заметками о новой версии'},
+  {n:'Барабан рекомендаций',d:'Карточки плейлистов слева — плеер займёт всю ширину'},
+  {n:'Плашка «Моя волна обновилась»',d:'Уведомление в правом верхнем углу'}
 ];
 let tweaksMask=0;
 function renderTweaks(){
@@ -1986,7 +1988,7 @@ static void InitWebView(){
                                         SaveYmKeys();SendHubYmKeys();}}
                                 else if(msg.rfind(L"toggle-tweak:",0)==0){
                                     int idx=_wtoi(msg.c_str()+13);
-                                    if(idx>=0&&idx<3){
+                                    if(idx>=0&&idx<5){
                                         g_tweaksMask^=(1u<<idx);
                                         SaveTweaks();SendHubTweaks();}}}
                             return S_OK;}).Get(),nullptr);

@@ -72,7 +72,9 @@ enum {
     TWEAK_AI_WORDS    = 0, // AI-комментарии о треке (искра под плеером)
     TWEAK_VIBE_ANIM   = 1, // Анимация фона плеера
     TWEAK_RELEASE_PIN = 2, // Плашка "Версия приложения" / что нового
-    TWEAK_COUNT       = 3,
+    TWEAK_WHEEL       = 3, // Барабан рекомендаций слева (плейлисты-карточки)
+    TWEAK_WAVE_PILL   = 4, // Плашка "Моя волна обновилась" в углу
+    TWEAK_COUNT       = 5,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table
