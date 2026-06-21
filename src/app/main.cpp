@@ -1061,23 +1061,6 @@ html,body{width:100%;height:100%;overflow:hidden;
 /* ── App shell ── */
 #app{display:flex;height:100%}
 
-/* ── Header / drag zone ── */
-#header{
-  position:absolute;top:0;left:56px;right:0;height:44px;z-index:10;
-  display:flex;align-items:center;padding:0 16px;gap:12px;
-  background:linear-gradient(180deg,rgba(13,13,20,.95) 60%,transparent 100%);
-  -webkit-app-region:drag;
-}
-#header-title{font-size:13px;font-weight:600;color:rgba(255,255,255,.5);flex:1;letter-spacing:.3px;}
-#header-close{
-  width:28px;height:28px;border:none;border-radius:8px;
-  background:transparent;cursor:pointer;
-  color:rgba(255,255,255,.35);display:flex;align-items:center;justify-content:center;
-  transition:all .15s;-webkit-app-region:no-drag;
-}
-#header-close:hover{background:rgba(220,60,60,.7);color:#fff;}
-#header-close svg{pointer-events:none;}
-
 /* ── Sidebar ── */
 #sidebar{
   width:56px;background:var(--sb);
@@ -1115,7 +1098,7 @@ html,body{width:100%;height:100%;overflow:hidden;
 /* ── Content ── */
 #content{flex:1;overflow:hidden;position:relative;}
 .tab{
-  position:absolute;inset:0;padding:52px 24px 24px;
+  position:absolute;inset:0;padding:24px;
   overflow-y:auto;opacity:0;pointer-events:none;
   transform:translateY(6px);
   transition:opacity .22s ease,transform .22s ease;
@@ -1395,16 +1378,6 @@ html,body{width:100%;height:100%;overflow:hidden;
     </button>
     <div id='dll-dot'></div>
   </nav>
-
-  <!-- Header drag zone -->
-  <div id='header'>
-    <span id='header-title'>YMHub</span>
-    <button id='header-close' onclick='send("close")' title='Свернуть'>
-      <svg width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round'>
-        <line x1='1' y1='1' x2='11' y2='11'/><line x1='11' y1='1' x2='1' y2='11'/>
-      </svg>
-    </button>
-  </div>
 
   <!-- Content -->
   <main id='content'>
@@ -2211,8 +2184,16 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     DwmSetWindowAttribute(g_hwnd,DWMWA_WINDOW_CORNER_PREFERENCE,&cp,sizeof(cp));}
 
     // ── Hub window ──────────────────────────────────────────
+    // WS_CAPTION gives the native titlebar (drag + close + icon) for
+    // free — the page used to draw its own redundant copy on top of it
+    // (a second "YMHub" title and a second close button); that's been
+    // removed from the HTML instead of removing the native caption,
+    // since the page's drag region was never actually wired to
+    // WM_NCHITTEST/NonClientRegion and so never worked anyway. hIcon/
+    // hIconSm are set here so the titlebar's icon slot isn't blank.
+    HICON hAppIcon=LoadIconW(hInst,MAKEINTRESOURCEW(1));
     {WNDCLASSEXW wc={sizeof(wc),0,HubWndProc,0,0,hInst,
-        nullptr,nullptr,(HBRUSH)GetStockObject(NULL_BRUSH),nullptr,L"YMHubMain",nullptr};
+        hAppIcon,nullptr,(HBRUSH)GetStockObject(NULL_BRUSH),nullptr,L"YMHubMain",hAppIcon};
     RegisterClassExW(&wc);}
     // Compute exact window size so client area = HW x HH
     {RECT wr={0,0,HW,HH};
