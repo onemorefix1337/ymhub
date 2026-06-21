@@ -168,6 +168,17 @@ static void SaveYmKeys(){
     for(int i=0;i<13;i++)
         RegSetDW(HKEY_CURRENT_USER,REG_APP,YMKEY_REG[i],(g_ymKeys[i].mods<<16)|g_ymKeys[i].vk);}
 
+// "Твики" hub tab — UI declutter toggles (see TWEAK_* in shared/ipc.h).
+static DWORD g_tweaksMask=0;
+static void LoadTweaks(){g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);}
+static void PushTweaksToIPC(){
+    if(!g_ipc)return;
+    g_ipc->tweaksMask=g_tweaksMask;
+    InterlockedIncrement(&g_ipc->tweaksSeq);}
+static void SaveTweaks(){
+    RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
+    PushTweaksToIPC();}
+
 // Default VK codes for YM's own "Горячие клавиши", in the same order as
 // g_ymKeys/YM_ROW_INFO in the hub UI (play/pause, mute, seek fwd/back,
 // vol up/down, like, dislike, repeat, shuffle, next, prev, fullscreen).
@@ -395,6 +406,12 @@ static void SendHubYmKeys(){
         swprintf_s(part,L"%s{\"m\":%u,\"v\":%u}",i?L",":L"",g_ymKeys[i].mods,g_ymKeys[i].vk);
         wcscat_s(buf,part);}
     wcscat_s(buf,L"]}");
+    g_hubWv->PostWebMessageAsString(buf);}
+
+static void SendHubTweaks(){
+    if(!g_hubWv)return;
+    wchar_t buf[64];
+    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u}",g_tweaksMask);
     g_hubWv->PostWebMessageAsString(buf);}
 
 // ── IPC / DLL injection ───────────────────────────────────
@@ -1268,6 +1285,27 @@ html,body{width:100%;height:100%;overflow:hidden;
 .pc-btn.primary:hover{filter:brightness(1.1);}
 .pc-btn:disabled{opacity:.35;cursor:default;pointer-events:none;}
 
+/* ── Tweaks tab ── */
+.tw-row{
+  display:flex;align-items:center;gap:14px;padding:14px 4px;
+  border-bottom:1px solid var(--bord);
+}
+.tw-row:last-child{border-bottom:none;}
+.tw-lbl{flex:1;min-width:0;}
+.tw-name{font-size:13.5px;font-weight:500;}
+.tw-desc{font-size:11.5px;color:var(--txt2);margin-top:2px;}
+.tw-switch{
+  position:relative;width:38px;height:22px;flex-shrink:0;border-radius:99px;
+  background:rgba(255,255,255,.12);border:1px solid var(--bord);
+  cursor:pointer;transition:background .2s,border-color .2s;
+}
+.tw-switch.on{background:linear-gradient(135deg,var(--ac),var(--ac2));border-color:transparent;}
+.tw-switch .knob{
+  position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+  background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.4);
+}
+.tw-switch.on .knob{left:18px;}
+
 /* ── Update confirmation modal ── */
 #upd-scrim{
   position:fixed;inset:0;z-index:100;display:none;
@@ -1321,6 +1359,12 @@ html,body{width:100%;height:100%;overflow:hidden;
     <button class='nav-btn' id='nav-plugins' onclick='nav("plugins")' title='Плагины'>
       <svg width='19' height='19' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>
         <path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/>
+      </svg>
+    </button>
+    <button class='nav-btn' id='nav-tweaks' onclick='nav("tweaks")' title='Твики'>
+      <svg width='19' height='19' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>
+        <path d='M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3'/>
+        <circle cx='4' cy='12' r='2'/><circle cx='12' cy='10' r='2'/><circle cx='20' cy='14' r='2'/>
       </svg>
     </button>
     <button class='nav-btn' id='nav-about' onclick='nav("about")' title='О приложении'>
@@ -1469,6 +1513,13 @@ html,body{width:100%;height:100%;overflow:hidden;
           <button class='pc-btn' id='ovl-plug-btn' onclick='send("overlay-toggle")'>Показать</button>
         </div>
       </div>
+    </div>
+
+    <!-- ── Tweaks tab ── -->
+    <div class='tab' id='tab-tweaks'>
+      <div class='tab-title'>Твики</div>
+      <div class='tab-sub'>Скрыть отдельные элементы интерфейса Яндекс Музыки — применяется сразу</div>
+      <div id='tweak-rows'></div>
     </div>
 
     <!-- ── About tab ── -->
@@ -1664,6 +1715,23 @@ const YM_ROW_INFO=[
 let ymKeys=DEF_YM_DISPLAY.map(()=>({m:0,v:0}));
 let ymRecording=-1;
 
+// "Твики" tab — bit index matches TWEAK_* in shared/ipc.h.
+const TWEAK_INFO=[
+  {n:'AI-комментарии о треке',d:'Подсказка со искрой под плеером'},
+  {n:'Анимация фона плеера',d:'Цветной волновой фон Моей волны'},
+  {n:'Плашка «Версия приложения»',d:'Кнопка с заметками о новой версии'}
+];
+let tweaksMask=0;
+function renderTweaks(){
+  const cont=$('tweak-rows');if(!cont)return;cont.innerHTML='';
+  TWEAK_INFO.forEach((t,i)=>{
+    const on=(tweaksMask&(1<<i))!==0;
+    const row=document.createElement('div');row.className='tw-row';
+    row.innerHTML=`<div class='tw-lbl'><div class='tw-name'>${t.n}</div><div class='tw-desc'>${t.d}</div></div>
+      <div class='tw-switch${on?' on':''}' id='tws${i}' onclick='toggleTweak(${i})'><div class='knob'></div></div>`;
+    cont.appendChild(row);});}
+function toggleTweak(i){send('toggle-tweak:'+i);}
+
 function buildRows(){
   const cont=$('key-rows');cont.innerHTML='';
   for(let i=0;i<6;i++){
@@ -1796,6 +1864,7 @@ window.chrome.webview.addEventListener('message',e=>{
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
   if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
+  if(d.type==='init-tweaks'){tweaksMask=d.mask;renderTweaks();return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -1815,6 +1884,7 @@ window.chrome.webview.addEventListener('message',e=>{
 
 buildRows();
 buildYmRows();
+renderTweaks();
 </script>
 </body></html>)HUB";
 
@@ -1913,7 +1983,12 @@ static void InitWebView(){
                                     while(tok){nums.push_back((DWORD)_wtoi(tok));tok=wcstok_s(nullptr,L",",&ctx);}
                                     if(nums.size()==26){
                                         for(int i=0;i<13;i++)g_ymKeys[i]={nums[i*2],nums[i*2+1]};
-                                        SaveYmKeys();SendHubYmKeys();}}}
+                                        SaveYmKeys();SendHubYmKeys();}}
+                                else if(msg.rfind(L"toggle-tweak:",0)==0){
+                                    int idx=_wtoi(msg.c_str()+13);
+                                    if(idx>=0&&idx<3){
+                                        g_tweaksMask^=(1u<<idx);
+                                        SaveTweaks();SendHubTweaks();}}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(
@@ -1990,7 +2065,7 @@ static void CALLBACK OnInjectTick(HWND,UINT,UINT_PTR,DWORD){
         std::thread([](){EnsureDebugPort();g_debugPortCheckRunning=false;}).detach();}
     bool wasMissing=!IsDllLoaded();
     TryInject();
-    if(wasMissing&&IsDllLoaded())PushKeysToIPC();
+    if(wasMissing&&IsDllLoaded()){PushKeysToIPC();PushTweaksToIPC();}
     BroadcastState();}
 
 // ── Hub WndProc ───────────────────────────────────────────
@@ -2030,7 +2105,7 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
         return 0;
     case WM_APP+25: ParseYM();BroadcastState();return 0;
     case WM_APP+26: // hub nav complete → send initial state + keys
-        ParseYM();BroadcastState();SendHubKeys();SendHubYmKeys();return 0;
+        ParseYM();BroadcastState();SendHubKeys();SendHubYmKeys();SendHubTweaks();return 0;
     case WM_APP+31: // pos change from hub
         {int n=(int)wp;if(n>=0&&n<=5){
             g_pos=(Pos)n;
@@ -2079,6 +2154,7 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
 
     LoadKeys();
     LoadYmKeys();
+    LoadTweaks();
     InitIPC();
     g_pos=(Pos)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Pos",(DWORD)Pos::BC);
     if((int)g_pos<0||(int)g_pos>5)g_pos=Pos::BC;
@@ -2140,6 +2216,7 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     // ── Initial inject attempt ──────────────────────────────
     TryInject();
     PushKeysToIPC(); // write hotkey config + hostHwnd to IPC for DLL
+    PushTweaksToIPC();
 
     MSG msg;
     while(GetMessageW(&msg,nullptr,0,0)){TranslateMessage(&msg);DispatchMessageW(&msg);}

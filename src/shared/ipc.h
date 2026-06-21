@@ -57,6 +57,22 @@ struct YMHubIPC {
     // Chromium is concerned.
     volatile LONG  ymSendSeq;
     volatile DWORD ymSendIdx;
+
+    // Host -> DLL: UI declutter toggles ("Твики" hub tab) — bit i set means
+    // hide the element(s) matching kTweakSelectors[i] in dllmain.cpp. Pure
+    // CSS injection (display:none via a <style> tag), so it's reversible
+    // and doesn't touch YM's own state/behavior, just what's rendered.
+    volatile LONG  tweaksSeq;
+    volatile DWORD tweaksMask;
+};
+
+// Bit indices into YMHubIPC::tweaksMask — matches kTweakSelectors order in
+// dllmain.cpp and the row order in the hub's "Твики" tab.
+enum {
+    TWEAK_AI_WORDS    = 0, // AI-комментарии о треке (искра под плеером)
+    TWEAK_VIBE_ANIM   = 1, // Анимация фона плеера
+    TWEAK_RELEASE_PIN = 2, // Плашка "Версия приложения" / что нового
+    TWEAK_COUNT       = 3,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table

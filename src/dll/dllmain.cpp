@@ -19,6 +19,7 @@ static HANDLE        g_mutex      = nullptr;
 static volatile bool g_run        = false;
 static LONG          g_lastCmdSeq = 0;
 static LONG          g_lastYmSendSeq = 0;
+static LONG          g_lastTweaksSeq = 0;
 
 // Hotkey thread state
 static HWND          g_hkWnd      = nullptr;
@@ -492,6 +493,33 @@ static void CdpSendYmKey(DWORD idx) {
     CdpSend(buf); CdpRecv(resp);
 }
 
+// "Твики" hub tab — bit i in tweaksMask hides whatever matches
+// kTweakSelectors[i] (see TWEAK_* in shared/ipc.h). Pure CSS, injected via
+// a single persistent <style> tag rebuilt from the current mask — cheap
+// and idempotent, so it's safe to re-run on every LogBadgeThread tick as
+// well as immediately on toggle (WorkerThread's tweaksSeq watch), which
+// keeps it self-healing across YM's own SPA re-renders.
+static const char* kTweakSelectors[3] = {
+    "[class*='VibePage_words__']",      // AI-комментарии о треке
+    "[data-test-id='VIBE_ANIMATION']",  // анимация фона плеера
+    "[class*='MainPage_betaSlot__']",   // плашка "версия приложения"
+};
+static void CdpApplyTweaks(DWORD mask) {
+    if (!CdpEnsureConnected()) return;
+    std::string css;
+    for (int i = 0; i < 3; i++) {
+        if (mask & (1u << i)) {
+            css += kTweakSelectors[i];
+            css += "{display:none!important;}";
+        }
+    }
+    std::string js =
+        "(function(){var s=document.getElementById('ymhub-tweaks-style');"
+        "if(!s){s=document.createElement('style');s.id='ymhub-tweaks-style';document.head.appendChild(s);}"
+        "s.textContent=`" + css + "`;})()";
+    CdpRunJs(js);
+}
+
 // ── Command execution ───────────────────────────────────────────
 static void ExecCmd(DWORD cmd) {
     // Overlay toggle -> notify host
@@ -640,6 +668,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
+            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask);
         }
         Sleep(2000);
     }
@@ -666,6 +695,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;
     g_lastYmSendSeq = g_ipc->ymSendSeq;
+    g_lastTweaksSeq = g_ipc->tweaksSeq;
 
     // Wait for hotkey window to be ready (up to 2 s), then do initial registration
     for (int i = 0; i < 200 && !g_hkWnd && g_run; i++) Sleep(10);
@@ -691,6 +721,13 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         if (ys != g_lastYmSendSeq) {
             g_lastYmSendSeq = ys;
             CdpSendYmKey(g_ipc->ymSendIdx);
+        }
+        // Tweak toggled in the hub — apply immediately rather than waiting
+        // for LogBadgeThread's next 2s tick.
+        LONG ts = InterlockedCompareExchange(&g_ipc->tweaksSeq, 0, 0);
+        if (ts != g_lastTweaksSeq) {
+            g_lastTweaksSeq = ts;
+            CdpApplyTweaks(g_ipc->tweaksMask);
         }
         Sleep(15);
     }
