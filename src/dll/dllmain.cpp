@@ -520,7 +520,7 @@ static void CdpSendYmKey(DWORD idx) {
 // and idempotent, so it's safe to re-run on every LogBadgeThread tick as
 // well as immediately on toggle (WorkerThread's tweaksSeq watch), which
 // keeps it self-healing across YM's own SPA re-renders.
-static const char* kTweakSelectors[6] = {
+static const char* kTweakSelectors[7] = {
     "[class*='VibePage_words__']",      // AI-комментарии о треке
     "[data-test-id='VIBE_ANIMATION']",  // анимация фона плеера
     "[class*='MainPage_betaSlot__']",   // плашка "версия приложения"
@@ -533,11 +533,13 @@ static const char* kTweakSelectors[6] = {
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_FOR_YOU_AND_TRENDS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_CONCERTS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']", // лишние разделы меню
+    "[data-test-id='USER_PROFILE_PLUS_LINK'],"
+    "[data-test-id='USER_PROFILE_PLUS_BADGE']", // плюс-бейдж в профиле
 };
 static void CdpApplyTweaks(DWORD mask) {
     if (!CdpEnsureConnected()) return;
     std::string css;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         if (mask & (1u << i)) {
             css += kTweakSelectors[i];
             css += "{display:none!important;}";

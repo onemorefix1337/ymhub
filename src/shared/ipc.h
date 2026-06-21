@@ -81,7 +81,8 @@ enum {
     TWEAK_WHEEL       = 3, // Барабан рекомендаций слева (плейлисты-карточки)
     TWEAK_WAVE_PILL   = 4, // Плашка "Моя волна обновилась" в углу
     TWEAK_EXTRA_NAV   = 5, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
-    TWEAK_COUNT       = 6,
+    TWEAK_PLUS_BADGE  = 6, // ссылка/плашка подписки Плюс рядом с именем профиля
+    TWEAK_COUNT       = 7,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table

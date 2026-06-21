@@ -1116,9 +1116,11 @@ html,body{width:100%;height:100%;overflow:hidden;
 #content{flex:1;overflow:hidden;position:relative;}
 .tab{
   position:absolute;inset:0;padding:52px 24px 24px;
-  overflow-y:auto;display:none;
+  overflow-y:auto;opacity:0;pointer-events:none;
+  transform:translateY(6px);
+  transition:opacity .22s ease,transform .22s ease;
 }
-.tab.active{display:block;}
+.tab.active{opacity:1;pointer-events:auto;transform:translateY(0);}
 .tab-title{font-size:20px;font-weight:700;color:#fff;margin-bottom:4px;}
 .tab-sub{font-size:12px;color:var(--txt2);margin-bottom:20px;}
 
@@ -1741,7 +1743,8 @@ const TWEAK_INFO=[
   {n:'Плашка «Версия приложения»',d:'Кнопка с заметками о новой версии'},
   {n:'Барабан рекомендаций',d:'Карточки плейлистов слева — плеер займёт всю ширину'},
   {n:'Плашка «Моя волна обновилась»',d:'Уведомление в правом верхнем углу'},
-  {n:'Лишние разделы меню',d:'«Для вас и Тренды», «Концерты», «Книги и подкасты»'}
+  {n:'Лишние разделы меню',d:'«Для вас и Тренды», «Концерты», «Книги и подкасты»'},
+  {n:'Плюс-бейдж в профиле',d:'Ссылка и плашка подписки рядом с именем'}
 ];
 let tweaksMask=0;
 function renderTweaks(){
@@ -2020,7 +2023,7 @@ static void InitWebView(){
                                         SaveYmKeys();SendHubYmKeys();}}
                                 else if(msg.rfind(L"toggle-tweak:",0)==0){
                                     int idx=_wtoi(msg.c_str()+13);
-                                    if(idx>=0&&idx<6){
+                                    if(idx>=0&&idx<7){
                                         g_tweaksMask^=(1u<<idx);
                                         SaveTweaks();SendHubTweaks();}}}
                             return S_OK;}).Get(),nullptr);
