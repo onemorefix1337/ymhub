@@ -714,14 +714,23 @@ static int VerCompare(const std::wstring& a,const std::wstring& b){
 // keeps running under the old inode) — so the update can swap files in
 // place without a separate watcher process: rename current -> .old,
 // rename the downloaded build -> current's name, relaunch, exit.
-static void ApplyUpdateAndRestart(const std::wstring& newExePath){
+// Both renames use MOVEFILE_COPY_ALLOWED — plain MoveFileW fails outright
+// (ERROR_NOT_SAME_DEVICE) when the install dir and %TEMP% are on different
+// volumes, e.g. YMHub.exe living on a D: drive while %TEMP% is on C:, which
+// is exactly the kind of setup a friend's machine can have and a dev box
+// usually doesn't. That failure used to be swallowed silently (just
+// `return`, no UI feedback) leaving the hub stuck showing "Скачивание..."
+// forever — every failure path here now reports back through ok=false so
+// the caller can surface a real error instead of hanging.
+static bool ApplyUpdateAndRestart(const std::wstring& newExePath){
     wchar_t curPath[MAX_PATH];GetModuleFileNameW(nullptr,curPath,MAX_PATH);
     std::wstring oldPath=std::wstring(curPath)+L".old";
     DeleteFileW(oldPath.c_str()); // leftover from a previous update, if any
-    if(!MoveFileW(curPath,oldPath.c_str()))return;
-    if(!MoveFileW(newExePath.c_str(),curPath)){
-        MoveFileW(oldPath.c_str(),curPath); // best-effort rollback
-        return;}
+    if(!MoveFileExW(curPath,oldPath.c_str(),MOVEFILE_COPY_ALLOWED|MOVEFILE_REPLACE_EXISTING))
+        return false;
+    if(!MoveFileExW(newExePath.c_str(),curPath,MOVEFILE_COPY_ALLOWED|MOVEFILE_REPLACE_EXISTING)){
+        MoveFileExW(oldPath.c_str(),curPath,MOVEFILE_COPY_ALLOWED|MOVEFILE_REPLACE_EXISTING); // best-effort rollback
+        return false;}
     // The new process does a single-instance check on the same named
     // mutex — release it now (the old process is still shutting down
     // and would otherwise hold it long enough for the new one to see
@@ -731,10 +740,12 @@ static void ApplyUpdateAndRestart(const std::wstring& newExePath){
     PROCESS_INFORMATION pi{};
     std::wstring cmd=L"\""+std::wstring(curPath)+L"\"";
     std::wstring cmdMut=cmd;
-    if(CreateProcessW(nullptr,cmdMut.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi)){
-        CloseHandle(pi.hProcess);CloseHandle(pi.hThread);}
+    if(!CreateProcessW(nullptr,cmdMut.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&si,&pi))
+        return false;
+    CloseHandle(pi.hProcess);CloseHandle(pi.hThread);
     RestartYM(); // so the new YMHub injects its fresh DLL right away
-    if(g_hwnd)PostMessageW(g_hwnd,WM_CLOSE,0,0);}
+    if(g_hwnd)PostMessageW(g_hwnd,WM_CLOSE,0,0);
+    return true;}
 
 // WebView2's ICoreWebView2 is thread-affine to the UI thread that created
 // it — calling PostWebMessageAsString from a background thread silently
@@ -766,7 +777,7 @@ static void InstallPendingUpdate(){
     std::wstring newPath=std::wstring(tmpDir)+L"YMHub_update.exe";
     if(!HttpsDownloadToFile(g_pendingUpdateUrl,newPath)){
         PostUpdateStatus(L"error");return;}
-    ApplyUpdateAndRestart(newPath);}
+    if(!ApplyUpdateAndRestart(newPath))PostUpdateStatus(L"error");}
 
 // manual=true (the "Проверить обновления" button) pushes status updates
 // to the hub UI at every step. Either way, finding an update never installs
