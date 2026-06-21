@@ -64,11 +64,6 @@ struct YMHubIPC {
     // and doesn't touch YM's own state/behavior, just what's rendered.
     volatile LONG  tweaksSeq;
     volatile DWORD tweaksMask;
-
-    // Host -> DLL: player background tint, applied as a CSS hue-rotate
-    // filter on the Vibe animation canvas. Degrees 0-359; same tweaksSeq
-    // covers this too since it's applied together with tweaksMask.
-    volatile DWORD bgHueDeg;
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakSelectors order in

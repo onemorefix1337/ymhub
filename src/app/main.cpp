@@ -170,20 +170,13 @@ static void SaveYmKeys(){
 
 // "Твики" hub tab — UI declutter toggles (see TWEAK_* in shared/ipc.h).
 static DWORD g_tweaksMask=0;
-static DWORD g_bgHue=0;
-static void LoadTweaks(){
-    g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);
-    g_bgHue=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"TweaksHue",0);}
+static void LoadTweaks(){g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);}
 static void PushTweaksToIPC(){
     if(!g_ipc)return;
     g_ipc->tweaksMask=g_tweaksMask;
-    g_ipc->bgHueDeg=g_bgHue;
     InterlockedIncrement(&g_ipc->tweaksSeq);}
 static void SaveTweaks(){
     RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
-    PushTweaksToIPC();}
-static void SaveBgHue(){
-    RegSetDW(HKEY_CURRENT_USER,REG_APP,L"TweaksHue",g_bgHue);
     PushTweaksToIPC();}
 
 // Default VK codes for YM's own "Горячие клавиши", in the same order as
@@ -417,8 +410,8 @@ static void SendHubYmKeys(){
 
 static void SendHubTweaks(){
     if(!g_hubWv)return;
-    wchar_t buf[96];
-    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u,\"hue\":%u}",g_tweaksMask,g_bgHue);
+    wchar_t buf[64];
+    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u}",g_tweaksMask);
     g_hubWv->PostWebMessageAsString(buf);}
 
 // ── IPC / DLL injection ───────────────────────────────────
@@ -832,7 +825,11 @@ static void ShowOverlay(){
 static void OpenHub(){
     if(!g_hub)return;
     ShowWindow(g_hub,SW_SHOW);
-    SetForegroundWindow(g_hub);}
+    SetForegroundWindow(g_hub);
+    // WebView2 is a windowless/airspace control — without this, the very
+    // first click right after the hub window opens only activates the
+    // window and never reaches the page's DOM, requiring an extra click.
+    if(g_hubCtrl)g_hubCtrl->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);}
 
 // ── Overlay HTML ──────────────────────────────────────────
 static const wchar_t* HTML = LR"HTML(<!DOCTYPE html><html><head><meta charset="utf-8"><style>
@@ -1109,9 +1106,9 @@ html,body{width:100%;height:100%;overflow:hidden;
 #content{flex:1;overflow:hidden;position:relative;}
 .tab{
   position:absolute;inset:0;padding:52px 24px 24px;
-  overflow-y:auto;opacity:0;pointer-events:none;transition:opacity .18s;
+  overflow-y:auto;display:none;
 }
-.tab.active{opacity:1;pointer-events:auto;}
+.tab.active{display:block;}
 .tab-title{font-size:20px;font-weight:700;color:#fff;margin-bottom:4px;}
 .tab-sub{font-size:12px;color:var(--txt2);margin-bottom:20px;}
 
@@ -1317,13 +1314,6 @@ html,body{width:100%;height:100%;overflow:hidden;
   transition:left .35s cubic-bezier(.34,1.56,.64,1);
 }
 .tw-switch.on .knob{left:18px;}
-.hue-swatches{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;max-width:220px;}
-.hue-dot{
-  width:26px;height:26px;border-radius:50%;cursor:pointer;flex-shrink:0;
-  border:2px solid transparent;transition:transform .15s,border-color .15s;
-}
-.hue-dot:hover{transform:scale(1.12);}
-.hue-dot.on{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.15);}
 
 /* ── Update confirmation modal ── */
 #upd-scrim{
@@ -1539,10 +1529,6 @@ html,body{width:100%;height:100%;overflow:hidden;
       <div class='tab-title'>Твики</div>
       <div class='tab-sub'>Скрыть отдельные элементы интерфейса Яндекс Музыки — применяется сразу</div>
       <div id='tweak-rows'></div>
-      <div class='tw-row' style='align-items:flex-start'>
-        <div class='tw-lbl'><div class='tw-name'>Цвет фона плеера</div><div class='tw-desc'>Оттенок анимированного фона «Моей волны»</div></div>
-        <div id='hue-swatches' class='hue-swatches'></div>
-      </div>
     </div>
 
     <!-- ── About tab ── -->
@@ -1749,26 +1735,26 @@ const TWEAK_INFO=[
 ];
 let tweaksMask=0;
 function renderTweaks(){
-  const cont=$('tweak-rows');if(!cont)return;cont.innerHTML='';
+  // Built once; later mask updates only flip the .on class on the existing
+  // switch nodes (see applyTweaksMask) so the CSS transition actually has
+  // a "before" frame to animate from — rebuilding the nodes from scratch
+  // on every toggle made them appear already in their final state.
+  const cont=$('tweak-rows');if(!cont)return;
+  if(cont.children.length===TWEAK_INFO.length){applyTweaksMask();return;}
+  cont.innerHTML='';
   TWEAK_INFO.forEach((t,i)=>{
     const on=(tweaksMask&(1<<i))!==0;
     const row=document.createElement('div');row.className='tw-row';
     row.innerHTML=`<div class='tw-lbl'><div class='tw-name'>${t.n}</div><div class='tw-desc'>${t.d}</div></div>
       <div class='tw-switch${on?' on':''}' id='tws${i}' onclick='toggleTweak(${i})'><div class='knob'></div></div>`;
     cont.appendChild(row);});}
-function toggleTweak(i){send('toggle-tweak:'+i);}
-
-const HUE_PRESETS=[0,60,120,180,240,300];
-let bgHue=0;
-function renderHueSwatches(){
-  const cont=$('hue-swatches');if(!cont)return;cont.innerHTML='';
-  HUE_PRESETS.forEach(deg=>{
-    const dot=document.createElement('div');
-    dot.className='hue-dot'+(bgHue===deg?' on':'');
-    dot.style.background=`hsl(${(180+deg)%360},65%,55%)`;
-    dot.title=deg===0?'Стандартный':`+${deg}°`;
-    dot.onclick=()=>send('set-bg-hue:'+deg);
-    cont.appendChild(dot);});}
+function applyTweaksMask(){
+  TWEAK_INFO.forEach((t,i)=>{
+    const sw=$('tws'+i);if(!sw)return;
+    sw.classList.toggle('on',(tweaksMask&(1<<i))!==0);});}
+function toggleTweak(i){
+  tweaksMask^=(1<<i);applyTweaksMask(); // optimistic, instant — see renderTweaks comment
+  send('toggle-tweak:'+i);}
 
 function buildRows(){
   const cont=$('key-rows');cont.innerHTML='';
@@ -1902,7 +1888,7 @@ window.chrome.webview.addEventListener('message',e=>{
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
   if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
-  if(d.type==='init-tweaks'){tweaksMask=d.mask;bgHue=d.hue||0;renderTweaks();renderHueSwatches();return;}
+  if(d.type==='init-tweaks'){tweaksMask=d.mask;renderTweaks();return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -1923,7 +1909,6 @@ window.chrome.webview.addEventListener('message',e=>{
 buildRows();
 buildYmRows();
 renderTweaks();
-renderHueSwatches();
 </script>
 </body></html>)HUB";
 
@@ -2027,10 +2012,7 @@ static void InitWebView(){
                                     int idx=_wtoi(msg.c_str()+13);
                                     if(idx>=0&&idx<6){
                                         g_tweaksMask^=(1u<<idx);
-                                        SaveTweaks();SendHubTweaks();}}
-                                else if(msg.rfind(L"set-bg-hue:",0)==0){
-                                    int hue=_wtoi(msg.c_str()+11);
-                                    if(hue>=0&&hue<360){g_bgHue=(DWORD)hue;SaveBgHue();SendHubTweaks();}}}
+                                        SaveTweaks();SendHubTweaks();}}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(

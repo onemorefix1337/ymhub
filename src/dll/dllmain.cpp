@@ -513,7 +513,7 @@ static const char* kTweakSelectors[6] = {
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_CONCERTS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']", // лишние разделы меню
 };
-static void CdpApplyTweaks(DWORD mask, DWORD hueDeg) {
+static void CdpApplyTweaks(DWORD mask) {
     if (!CdpEnsureConnected()) return;
     std::string css;
     for (int i = 0; i < 6; i++) {
@@ -521,11 +521,6 @@ static void CdpApplyTweaks(DWORD mask, DWORD hueDeg) {
             css += kTweakSelectors[i];
             css += "{display:none!important;}";
         }
-    }
-    if (hueDeg) {
-        char buf[96];
-        sprintf_s(buf, "[data-test-id='VIBE_ANIMATION']{filter:hue-rotate(%udeg)!important;}", hueDeg % 360);
-        css += buf;
     }
     std::string js =
         "(function(){var s=document.getElementById('ymhub-tweaks-style');"
@@ -687,7 +682,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
-            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->bgHueDeg);
+            if (g_ipc) CdpApplyTweaks(g_ipc->tweaksMask);
         }
         Sleep(2000);
     }
@@ -746,7 +741,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         LONG ts = InterlockedCompareExchange(&g_ipc->tweaksSeq, 0, 0);
         if (ts != g_lastTweaksSeq) {
             g_lastTweaksSeq = ts;
-            CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->bgHueDeg);
+            CdpApplyTweaks(g_ipc->tweaksMask);
         }
         Sleep(15);
     }
