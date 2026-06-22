@@ -574,6 +574,17 @@ static void CdpApplyTweaks(DWORD mask) {
 // name is stashed in a data attribute the first time it's hidden so
 // turning the tweak back off can restore it exactly, instead of leaving
 // it stuck on whatever replacement text was last shown.
+//
+// Re-running this from scratch only happens every ~2s (LogBadgeThread) or
+// on toggle (WorkerThread's tweaksSeq watch), but switching between YM's
+// own sections (Моя волна / Поиск / Коллекция...) re-renders the sidebar
+// and recreates this element with the real name — which was visible for
+// up to that ~2s until the next poll caught it. A MutationObserver
+// installed on the page itself reacts to that re-render immediately
+// instead of waiting on our poll, so it's installed once (guarded by
+// window.__ymhubNameObs) and re-points itself at whatever apply() closure
+// (capturing the current replacement text/on-off state) this function
+// last installed on window.__ymhubNameApply.
 static void CdpApplyNameHide(bool on, const wchar_t* customNameW) {
     if (!CdpEnsureConnected()) return;
     std::string name = (customNameW && customNameW[0]) ? CdpUtf8(customNameW) : CdpUtf8(L"Скрыто");
@@ -583,13 +594,21 @@ static void CdpApplyNameHide(bool on, const wchar_t* customNameW) {
         esc += (char)c;
     }
     std::string js =
-        "(function(){var el=document.querySelector(\"[data-test-id='USER_PROFILE_USERNAME']\");"
+        "(function(){var rep=\"" + esc + "\";var on=" + std::string(on ? "true" : "false") + ";"
+        "function apply(){"
+        "var el=document.querySelector(\"[data-test-id='USER_PROFILE_USERNAME']\");"
         "if(!el)return;"
-        "if(" + std::string(on ? "true" : "false") + "){"
+        "if(on){"
         "if(!el.dataset.ymhubOrig)el.dataset.ymhubOrig=el.textContent;"
-        "el.textContent=\"" + esc + "\";"
+        "if(el.textContent!==rep)el.textContent=rep;"
         "}else if(el.dataset.ymhubOrig){"
         "el.textContent=el.dataset.ymhubOrig;delete el.dataset.ymhubOrig;"
+        "}}"
+        "window.__ymhubNameApply=apply;"
+        "apply();"
+        "if(!window.__ymhubNameObs){"
+        "window.__ymhubNameObs=new MutationObserver(function(){if(window.__ymhubNameApply)window.__ymhubNameApply();});"
+        "window.__ymhubNameObs.observe(document.body,{childList:true,subtree:true,characterData:true});"
         "}})()";
     CdpRunJs(js);
 }
