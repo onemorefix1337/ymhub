@@ -594,6 +594,111 @@ static void CdpApplyNameHide(bool on, const wchar_t* customNameW) {
     CdpRunJs(js);
 }
 
+// The profile dropdown (clicking the avatar at the bottom of the sidebar —
+// "Управление аккаунтом", phone/login, account switcher) is not part of the
+// YM page at all: it's Yandex Passport's own account-switcher UI rendered
+// as a genuinely cross-origin <iframe src="https://yandex.ru/user-id/...">.
+// Same-origin policy means JS running in the main page (CdpApplyNameHide
+// above, via the already-open g_cdpWs connection) cannot reach inside it —
+// that's a browser security boundary, not a CDP limitation. CDP itself
+// exposes the iframe as its own top-level debug target (visible in /json
+// as type:"iframe", with its own webSocketDebuggerUrl) only while the
+// dropdown is actually open, so this opens a short-lived second WebSocket
+// straight to that target instead of trying to extend the main connection.
+static std::wstring CdpFindPassportWsPath() {
+    std::string body;
+    if (!CdpHttpGet(L"/json", body)) return L"";
+    auto p = body.find("https://yandex.ru/user-id");
+    if (p == std::string::npos) return L""; // dropdown isn't open right now
+    auto wsKey = body.find("webSocketDebuggerUrl", p);
+    if (wsKey == std::string::npos) return L"";
+    auto q1 = body.find('"', wsKey + 22);
+    auto q2 = (q1 != std::string::npos) ? body.find('"', q1 + 1) : std::string::npos;
+    if (q1 == std::string::npos || q2 == std::string::npos) return L"";
+    std::string url = body.substr(q1 + 1, q2 - q1 - 1);
+    auto dp = url.find("/devtools");
+    if (dp == std::string::npos) return L"";
+    std::string path = url.substr(dp);
+    return std::wstring(path.begin(), path.end());
+}
+
+// One-shot connect/eval/close against an arbitrary CDP target path, kept
+// fully separate from g_cdpWs (which stays dedicated to the main page) so
+// this can't disturb that connection's state.
+static void CdpRunJsOnPath(const std::wstring& wsPath, const std::string& jsUtf8) {
+    HINTERNET hSession = WinHttpOpen(L"YMHub", WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return;
+    WinHttpSetTimeouts(hSession, 1000, 1000, 1000, 2000);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"127.0.0.1", (INTERNET_PORT)CdpPort(), 0);
+    if (hConnect) {
+        HINTERNET hReq = WinHttpOpenRequest(hConnect, L"GET", wsPath.c_str(), nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        if (hReq) {
+            bool ok = WinHttpSetOption(hReq, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0) &&
+                WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                WinHttpReceiveResponse(hReq, nullptr);
+            HINTERNET hWs = ok ? WinHttpWebSocketCompleteUpgrade(hReq, 0) : nullptr;
+            WinHttpCloseHandle(hReq);
+            if (hWs) {
+                std::string req = "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
+                    CdpJsonEscape(jsUtf8) + "\"}}";
+                if (WinHttpWebSocketSend(hWs, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                        (PVOID)req.data(), (DWORD)req.size()) == NO_ERROR) {
+                    char buf[16384]; DWORD read = 0; WINHTTP_WEB_SOCKET_BUFFER_TYPE bt;
+                    WinHttpWebSocketReceive(hWs, buf, sizeof(buf), &read, &bt);
+                }
+                WinHttpCloseHandle(hWs);
+            }
+        }
+        WinHttpCloseHandle(hConnect);
+    }
+    WinHttpCloseHandle(hSession);
+}
+
+// Same replace/restore idea as CdpApplyNameHide, but reaching into the
+// Passport iframe: the top profile card's name + masked phone/login line
+// (stable-ish CSS-module classes, substring-matched the same way the rest
+// of kTweakRules matches YM's own hashed classes), and every account-
+// switcher row ([data-testid='user-item'], a stable attribute Passport
+// itself uses) — those rows have no per-field class to target individual
+// text, so all of a row's leaf text nodes are captured up front (so the
+// node count/order needed to restore them is known before anything is
+// mutated) and only the first non-blank one is overwritten with the
+// replacement text, the rest blanked.
+static void CdpApplyPassportNameHide(bool on, const wchar_t* customNameW) {
+    std::wstring wsPath = CdpFindPassportWsPath();
+    if (wsPath.empty()) return;
+    std::string name = (customNameW && customNameW[0]) ? CdpUtf8(customNameW) : CdpUtf8(L"Скрыто");
+    std::string esc; esc.reserve(name.size());
+    for (unsigned char c : name) {
+        if (c == '"' || c == '\\') esc += '\\';
+        esc += (char)c;
+    }
+    std::string js =
+        "(function(){var rep=\"" + esc + "\";var on=" + std::string(on ? "true" : "false") + ";"
+        "function swap(el,blank){if(!el)return;"
+        "if(on){if(!el.dataset.ymhubOrig)el.dataset.ymhubOrig=el.textContent;el.textContent=blank?'':rep;}"
+        "else if(el.dataset.ymhubOrig){el.textContent=el.dataset.ymhubOrig;delete el.dataset.ymhubOrig;}}"
+        "swap(document.querySelector(\"[class*='_title_1aljm_']\"),false);"
+        "swap(document.querySelector(\"[class*='_caption_1aljm_']\"),true);"
+        "document.querySelectorAll(\"[data-testid='user-item']\").forEach(function(item){"
+        "if(on){if(!item.dataset.ymhubOrig){"
+        "var orig=[];var w=document.createTreeWalker(item,NodeFilter.SHOW_TEXT);var n;"
+        "while(n=w.nextNode())orig.push(n.nodeValue);"
+        "item.dataset.ymhubOrig=JSON.stringify(orig);"
+        "var w2=document.createTreeWalker(item,NodeFilter.SHOW_TEXT);var n2,first=true;"
+        "while(n2=w2.nextNode()){if(n2.nodeValue.trim()){n2.nodeValue=first?rep:'';first=false;}}"
+        "}}else if(item.dataset.ymhubOrig){"
+        "var orig=JSON.parse(item.dataset.ymhubOrig);"
+        "var w=document.createTreeWalker(item,NodeFilter.SHOW_TEXT);var n,i=0;"
+        "while(n=w.nextNode()){if(i<orig.length){n.nodeValue=orig[i];i++;}}"
+        "delete item.dataset.ymhubOrig;"
+        "}});"
+        "})()";
+    CdpRunJsOnPath(wsPath, js);
+}
+
 // ── Command execution ───────────────────────────────────────────
 static void ExecCmd(DWORD cmd) {
     // Overlay toggle -> notify host
@@ -750,6 +855,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
             if (g_ipc) {
                 CdpApplyTweaks(g_ipc->tweaksMask);
                 CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
+                CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
             }
         }
@@ -812,6 +918,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
             g_lastTweaksSeq = ts;
             CdpApplyTweaks(g_ipc->tweaksMask);
             CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
+            CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
         }
         Sleep(15);
     }
