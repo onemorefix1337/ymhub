@@ -568,6 +568,32 @@ static void CdpApplyTweaks(DWORD mask) {
     CdpRunJs(js);
 }
 
+// TWEAK_HIDE_NAME — unlike kTweakRules above, this needs the actual name
+// text overwritten (CSS can't substitute arbitrary user-provided text),
+// so it's a direct DOM mutation instead of a stylesheet rule. The real
+// name is stashed in a data attribute the first time it's hidden so
+// turning the tweak back off can restore it exactly, instead of leaving
+// it stuck on whatever replacement text was last shown.
+static void CdpApplyNameHide(bool on, const wchar_t* customNameW) {
+    if (!CdpEnsureConnected()) return;
+    std::string name = (customNameW && customNameW[0]) ? CdpUtf8(customNameW) : CdpUtf8(L"Скрыто");
+    std::string esc; esc.reserve(name.size());
+    for (unsigned char c : name) { // escape for the JS string literal below
+        if (c == '"' || c == '\\') esc += '\\';
+        esc += (char)c;
+    }
+    std::string js =
+        "(function(){var el=document.querySelector(\"[data-test-id='USER_PROFILE_USERNAME']\");"
+        "if(!el)return;"
+        "if(" + std::string(on ? "true" : "false") + "){"
+        "if(!el.dataset.ymhubOrig)el.dataset.ymhubOrig=el.textContent;"
+        "el.textContent=\"" + esc + "\";"
+        "}else if(el.dataset.ymhubOrig){"
+        "el.textContent=el.dataset.ymhubOrig;delete el.dataset.ymhubOrig;"
+        "}})()";
+    CdpRunJs(js);
+}
+
 // ── Command execution ───────────────────────────────────────────
 static void ExecCmd(DWORD cmd) {
     // Overlay toggle -> notify host
@@ -723,6 +749,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
             CdpInjectSettingsLogRow(LogBlob());
             if (g_ipc) {
                 CdpApplyTweaks(g_ipc->tweaksMask);
+                CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
             }
         }
@@ -784,6 +811,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         if (ts != g_lastTweaksSeq) {
             g_lastTweaksSeq = ts;
             CdpApplyTweaks(g_ipc->tweaksMask);
+            CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
         }
         Sleep(15);
     }

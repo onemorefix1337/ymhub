@@ -65,6 +65,11 @@ struct YMHubIPC {
     volatile LONG  tweaksSeq;
     volatile DWORD tweaksMask;
 
+    // Host -> DLL: replacement text for TWEAK_HIDE_NAME, set from the
+    // hub's text input next to that tweak's toggle. Empty string means
+    // the DLL substitutes its own default ("Скрыто") instead.
+    wchar_t customName[32];
+
     // DLL -> host: real liked state of the current track, polled from YM's
     // own DOM every ~2s (see CdpQueryLiked in dllmain.cpp) — covers likes
     // made outside the hub's own optimistic toggle (YM's native UI,
@@ -83,7 +88,8 @@ enum {
     TWEAK_EXTRA_NAV   = 5, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
     TWEAK_PLUS_BADGE  = 6, // ссылка/плашка подписки Плюс рядом с именем профиля
     TWEAK_BIG_COVER   = 7, // крупная обложка трека на странице "Моя волна"
-    TWEAK_COUNT       = 8,
+    TWEAK_HIDE_NAME   = 8, // подменяет имя пользователя на свой текст / "Скрыто"
+    TWEAK_COUNT       = 9,
 };
 
 // Index order for YMHubIPC::ymSendIdx and the matching default-key table

@@ -121,6 +121,17 @@ static void RegSetDW(HKEY root,const wchar_t* k,const wchar_t* v,DWORD d){
     RegCreateKeyExW(root,k,0,nullptr,0,KEY_WRITE,nullptr,&hk,nullptr);
     RegSetValueExW(hk,v,0,REG_DWORD,(BYTE*)&d,sizeof(d));
     RegCloseKey(hk);}
+static std::wstring RegGetStr(HKEY root,const wchar_t* k,const wchar_t* v){
+    HKEY hk;wchar_t buf[64]={0};DWORD sz=sizeof(buf);
+    if(RegOpenKeyExW(root,k,0,KEY_READ,&hk)==ERROR_SUCCESS){
+        if(RegQueryValueExW(hk,v,nullptr,nullptr,(BYTE*)buf,&sz)!=ERROR_SUCCESS)buf[0]=0;
+        RegCloseKey(hk);}
+    return buf;}
+static void RegSetStr(HKEY root,const wchar_t* k,const wchar_t* v,const std::wstring& s){
+    HKEY hk;
+    RegCreateKeyExW(root,k,0,nullptr,0,KEY_WRITE,nullptr,&hk,nullptr);
+    RegSetValueExW(hk,v,0,REG_SZ,(BYTE*)s.c_str(),(DWORD)((s.size()+1)*sizeof(wchar_t)));
+    RegCloseKey(hk);}
 static bool IsAutostart(){
     HKEY hk;bool has=false;
     if(RegOpenKeyExW(HKEY_CURRENT_USER,REG_RUN,0,KEY_READ,&hk)==ERROR_SUCCESS){
@@ -170,13 +181,23 @@ static void SaveYmKeys(){
 
 // "Твики" hub tab — UI declutter toggles (see TWEAK_* in shared/ipc.h).
 static DWORD g_tweaksMask=0;
-static void LoadTweaks(){g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);}
+// Replacement text for TWEAK_HIDE_NAME — empty means the DLL falls back to
+// "Скрыто" itself (see CdpApplyNameHide in dllmain.cpp).
+static std::wstring g_customName;
+static void LoadTweaks(){
+    g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);
+    g_customName=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName");}
 static void PushTweaksToIPC(){
     if(!g_ipc)return;
     g_ipc->tweaksMask=g_tweaksMask;
+    wcsncpy_s(g_ipc->customName,g_customName.c_str(),_TRUNCATE);
     InterlockedIncrement(&g_ipc->tweaksSeq);}
 static void SaveTweaks(){
     RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
+    PushTweaksToIPC();}
+static void SaveCustomName(const std::wstring& s){
+    g_customName=s;
+    RegSetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName",g_customName);
     PushTweaksToIPC();}
 
 // Default VK codes for YM's own "Горячие клавиши", in the same order as
@@ -420,9 +441,9 @@ static void SendHubYmKeys(){
 
 static void SendHubTweaks(){
     if(!g_hubWv)return;
-    wchar_t buf[64];
-    swprintf_s(buf,L"{\"type\":\"init-tweaks\",\"mask\":%u}",g_tweaksMask);
-    g_hubWv->PostWebMessageAsString(buf);}
+    std::wstring msg=L"{\"type\":\"init-tweaks\",\"mask\":"+std::to_wstring(g_tweaksMask)+
+        L",\"customName\":\""+JsonEsc(g_customName)+L"\"}";
+    g_hubWv->PostWebMessageAsString(msg.c_str());}
 
 // ── IPC / DLL injection ───────────────────────────────────
 static void InitIPC(){
@@ -1320,6 +1341,14 @@ html,body{width:100%;height:100%;overflow:hidden;
   transition:left .35s cubic-bezier(.34,1.56,.64,1);
 }
 .tw-switch.on .knob{left:18px;}
+.tw-row{flex-wrap:wrap;}
+.tw-input{
+  flex-basis:100%;margin-top:10px;display:none;
+  background:rgba(255,255,255,.05);border:1px solid var(--bord);border-radius:8px;
+  color:var(--txt);font-size:13px;padding:8px 10px;outline:none;
+}
+.tw-input:focus{border-color:rgba(91,143,255,.4);}
+.tw-row.on .tw-input{display:block;}
 
 /* ── Update confirmation modal ── */
 #upd-scrim{
@@ -1729,9 +1758,10 @@ const TWEAK_INFO=[
   {n:'Плашка «Моя волна обновилась»',d:'Уведомление в правом верхнем углу'},
   {n:'Лишние разделы меню',d:'«Для вас и Тренды», «Концерты», «Книги и подкасты»'},
   {n:'Плюс-бейдж в профиле',d:'Ссылка и плашка подписки рядом с именем'},
-  {n:'Крупная обложка трека',d:'Увеличивает обложку на странице «Моя волна»'}
+  {n:'Крупная обложка трека',d:'Увеличивает обложку на странице «Моя волна»'},
+  {n:'Скрыть имя пользователя',d:'Своё имя вместо настоящего, или просто «Скрыто»',input:true}
 ];
-let tweaksMask=0;
+let tweaksMask=0,customName='';
 function renderTweaks(){
   // Built once; later mask updates only flip the .on class on the existing
   // switch nodes (see applyTweaksMask) so the CSS transition actually has
@@ -1742,14 +1772,17 @@ function renderTweaks(){
   cont.innerHTML='';
   TWEAK_INFO.forEach((t,i)=>{
     const on=(tweaksMask&(1<<i))!==0;
-    const row=document.createElement('div');row.className='tw-row';
+    const row=document.createElement('div');row.className='tw-row'+(on?' on':'');
     row.innerHTML=`<div class='tw-lbl'><div class='tw-name'>${t.n}</div><div class='tw-desc'>${t.d}</div></div>
-      <div class='tw-switch${on?' on':''}' id='tws${i}' onclick='toggleTweak(${i})'><div class='knob'></div></div>`;
+      <div class='tw-switch${on?' on':''}' id='tws${i}' onclick='toggleTweak(${i})'><div class='knob'></div></div>`+
+      (t.input?`<input class='tw-input' id='twi${i}' placeholder='Скрыто' maxlength='31' value='${customName}' onchange='send("set-custom-name:"+this.value)'>`:'');
     cont.appendChild(row);});}
 function applyTweaksMask(){
   TWEAK_INFO.forEach((t,i)=>{
     const sw=$('tws'+i);if(!sw)return;
-    sw.classList.toggle('on',(tweaksMask&(1<<i))!==0);});}
+    const on=(tweaksMask&(1<<i))!==0;
+    sw.classList.toggle('on',on);
+    sw.parentElement.classList.toggle('on',on);});}
 function toggleTweak(i){
   tweaksMask^=(1<<i);applyTweaksMask(); // optimistic, instant — see renderTweaks comment
   send('toggle-tweak:'+i);}
@@ -1886,7 +1919,7 @@ window.chrome.webview.addEventListener('message',e=>{
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
   if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
-  if(d.type==='init-tweaks'){tweaksMask=d.mask;renderTweaks();return;}
+  if(d.type==='init-tweaks'){tweaksMask=d.mask;customName=d.customName||'';renderTweaks();return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -2008,9 +2041,11 @@ static void InitWebView(){
                                         SaveYmKeys();SendHubYmKeys();}}
                                 else if(msg.rfind(L"toggle-tweak:",0)==0){
                                     int idx=_wtoi(msg.c_str()+13);
-                                    if(idx>=0&&idx<8){
+                                    if(idx>=0&&idx<9){
                                         g_tweaksMask^=(1u<<idx);
-                                        SaveTweaks();SendHubTweaks();}}}
+                                        SaveTweaks();SendHubTweaks();}}
+                                else if(msg.rfind(L"set-custom-name:",0)==0){
+                                    SaveCustomName(msg.substr(16));}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(
