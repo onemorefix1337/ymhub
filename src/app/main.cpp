@@ -25,6 +25,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <vector>
+#include <ctime>
 #include "../shared/ipc.h"
 #include "../shared/version.h"
 
@@ -405,6 +406,120 @@ static std::wstring JsonEsc(const std::wstring& s){
         else if(c==L'\n')r+=L"\\n";
         else r+=c;}
     return r;}
+static std::string ToUtf8(const std::wstring& w){
+    if(w.empty())return std::string();
+    int n=WideCharToMultiByte(CP_UTF8,0,w.c_str(),(int)w.size(),nullptr,0,nullptr,nullptr);
+    std::string r(n,0);
+    WideCharToMultiByte(CP_UTF8,0,w.c_str(),(int)w.size(),r.data(),n,nullptr,nullptr);
+    return r;}
+
+// ── Discord Rich Presence ─────────────────────────────────
+// No SDK, just Discord's local RPC pipe protocol: connect to
+// \\.\pipe\discord-ipc-N (N=0..9 — desktop Discord is almost always 0,
+// higher indices only matter if multiple Discord-family clients are
+// running), send a one-time handshake frame, then a SET_ACTIVITY frame
+// whenever the track changes. Each frame is an 8-byte header (int32
+// opcode, int32 length) followed by that many bytes of JSON. All I/O
+// goes through overlapped reads/writes with a short timeout — a hung
+// or unresponsive Discord must not be able to stall this thread
+// indefinitely (the DLL's CDP client has the same concern, see its
+// WinHTTP timeout comments).
+static const char* DISCORD_CLIENT_ID = "1518944722310266911";
+static HANDLE g_discordPipe = nullptr;
+static HANDLE g_discordEvt  = nullptr;
+static bool   g_discordEnabled = false;
+static time_t g_discordStart = 0;
+static std::wstring g_discordLastTrack, g_discordLastArtist;
+static bool g_discordWasSent = false;
+
+static void LoadDiscordSetting(){
+    g_discordEnabled = RegGetDW(HKEY_CURRENT_USER,REG_APP,L"DiscordRpc",0)!=0;}
+static void SaveDiscordSetting(bool on){
+    g_discordEnabled=on;
+    RegSetDW(HKEY_CURRENT_USER,REG_APP,L"DiscordRpc",on?1:0);}
+
+static void DiscordClose(){
+    if(g_discordPipe){CloseHandle(g_discordPipe);g_discordPipe=nullptr;}}
+
+static bool DiscordIo(bool isWrite,void* buf,DWORD len,DWORD timeoutMs){
+    if(!g_discordPipe)return false;
+    OVERLAPPED ov={};ov.hEvent=g_discordEvt;ResetEvent(g_discordEvt);
+    BOOL ok=isWrite?WriteFile(g_discordPipe,buf,len,nullptr,&ov):ReadFile(g_discordPipe,buf,len,nullptr,&ov);
+    if(!ok){
+        if(GetLastError()!=ERROR_IO_PENDING)return false;
+        if(WaitForSingleObject(g_discordEvt,timeoutMs)!=WAIT_OBJECT_0){CancelIoEx(g_discordPipe,&ov);return false;}
+    }
+    DWORD xferred=0;
+    return GetOverlappedResult(g_discordPipe,&ov,&xferred,FALSE)&&xferred==len;}
+
+static bool DiscordSendFrame(int opcode,const std::string& json){
+    BYTE hdr[8];DWORD len=(DWORD)json.size();
+    memcpy(hdr,&opcode,4);memcpy(hdr+4,&len,4);
+    if(!DiscordIo(true,hdr,8,300))return false;
+    if(len&&!DiscordIo(true,(void*)json.data(),len,300))return false;
+    return true;}
+
+// Measured empirically: Discord's very first handshake reply (the READY
+// dispatch, carrying its whole user/config blob) can take ~850ms — way
+// past what a steady-state ack needs — so the handshake recv gets its own
+// much longer allowance than regular frames.
+static bool DiscordRecvFrame(DWORD timeoutMs=500){
+    BYTE hdr[8];
+    if(!DiscordIo(false,hdr,8,timeoutMs))return false;
+    DWORD len;memcpy(&len,hdr+4,4);
+    if(len>65536)return false;
+    std::string body(len,'\0');
+    if(len&&!DiscordIo(false,body.data(),len,timeoutMs))return false;
+    return true;}
+
+static bool DiscordConnect(){
+    if(g_discordPipe)return true;
+    if(!g_discordEvt)g_discordEvt=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    for(int i=0;i<10;i++){
+        wchar_t path[64];swprintf_s(path,L"\\\\.\\pipe\\discord-ipc-%d",i);
+        HANDLE h=CreateFileW(path,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,nullptr);
+        if(h!=INVALID_HANDLE_VALUE){g_discordPipe=h;break;}
+    }
+    if(!g_discordPipe)return false; // Discord isn't running — not an error, just nothing to do yet
+    std::string hs=std::string("{\"v\":1,\"client_id\":\"")+DISCORD_CLIENT_ID+"\"}";
+    if(!DiscordSendFrame(0,hs)||!DiscordRecvFrame(3000)){DiscordClose();return false;}
+    return true;}
+
+static void DiscordClearActivity(){
+    if(!DiscordConnect())return;
+    std::string activity="{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(GetCurrentProcessId())+
+        ",\"activity\":null},\"nonce\":\"ymhub-clear\"}";
+    if(!DiscordSendFrame(1,activity)||!DiscordRecvFrame())DiscordClose();}
+
+// Called every ~2s from a dedicated thread (DiscordThreadFn) — track/
+// artist/playing are read without synchronization, same as
+// BroadcastState() already does with these same globals elsewhere in
+// this file; a torn read here just means presence updates a tick late.
+static void DiscordTick(){
+    if(!g_discordEnabled){
+        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();}
+        return;}
+    if(!g_playing||g_track.empty()){
+        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();}
+        return;}
+    if(g_track==g_discordLastTrack&&g_artist==g_discordLastArtist&&g_discordWasSent)
+        return; // nothing actually changed — don't spam SET_ACTIVITY
+    if(g_track!=g_discordLastTrack||g_artist!=g_discordLastArtist)g_discordStart=time(nullptr);
+    if(!DiscordConnect())return;
+    std::string details=ToUtf8(JsonEsc(g_track));
+    std::string state  =ToUtf8(JsonEsc(g_artist));
+    std::string activity=
+        "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(GetCurrentProcessId())+
+        ",\"activity\":{\"type\":2,\"details\":\""+details+"\",\"state\":\""+state+"\","
+        "\"timestamps\":{\"start\":"+std::to_string((long long)g_discordStart)+"},"
+        "\"instance\":false}},\"nonce\":\"ymhub-set\"}";
+    if(DiscordSendFrame(1,activity)&&DiscordRecvFrame()){
+        g_discordLastTrack=g_track;g_discordLastArtist=g_artist;g_discordWasSent=true;
+    } else DiscordClose(); // reconnect from scratch next tick
+}
+
+static void DiscordThreadFn(){
+    for(;;){DiscordTick();Sleep(2000);}}
 
 static bool IsDllLoaded(){
     HANDLE h=OpenMutexW(SYNCHRONIZE,FALSE,YMH_MUTEX_NAME);
@@ -424,6 +539,8 @@ static void BroadcastState(){
         L",\"dllLoaded\":"+(dll?L"true":L"false")+
         L",\"overlayVisible\":"+(g_visible?L"true":L"false")+
         L",\"pos\":"+std::to_wstring((int)g_pos)+
+        L",\"drpcEnabled\":"+(g_discordEnabled?L"true":L"false")+
+        L",\"drpcConnected\":"+(g_discordPipe?L"true":L"false")+
         L",\"ver\":\"" YMHUB_VERSION_W L"\""
         L"}";
     if(g_wv)    g_wv->PostWebMessageAsString(msg.c_str());
@@ -1313,6 +1430,7 @@ html,body{width:100%;height:100%;overflow:hidden;
 }
 .pc-icon.blue{background:rgba(91,143,255,.18);}
 .pc-icon.violet{background:rgba(124,111,255,.18);}
+.pc-icon.discord{background:rgba(88,101,242,.18);}
 .pc-name{font-size:14px;font-weight:600;margin-bottom:3px;}
 .pc-desc{font-size:12px;color:var(--txt2);}
 .pc-row{display:flex;align-items:center;gap:10px;}
@@ -1573,6 +1691,21 @@ html,body{width:100%;height:100%;overflow:hidden;
           <button class='pc-btn' id='ovl-plug-btn' onclick='send("overlay-toggle")'>Показать</button>
         </div>
       </div>
+
+      <div class='plugin-card'>
+        <div class='pc-head'>
+          <div class='pc-icon discord'>🎧</div>
+          <div>
+            <div class='pc-name'>Discord Rich Presence</div>
+            <div class='pc-desc'>Показывает играющий трек в статусе Discord — название и исполнителя</div>
+          </div>
+        </div>
+        <div class='pc-row'>
+          <div class='sdot' id='drpc-dot'></div>
+          <div class='stxt' id='drpc-txt'>Выключено</div>
+          <button class='pc-btn' id='drpc-btn' onclick='send("drpc-toggle")'>Включить</button>
+        </div>
+      </div>
     </div>
 
     <!-- ── Tweaks tab ── -->
@@ -1725,6 +1858,13 @@ function updateState(d) {
   $('sync-btn').disabled=dll;
   $('sync-btn').textContent=dll?'✓ Загружена':'Загрузить';
   $('sync-btn').className=dll?'pc-btn':'pc-btn primary';
+
+  // Discord Rich Presence state
+  const drpcOn=!!d.drpcEnabled,drpcConn=!!d.drpcConnected;
+  $('drpc-dot').classList.toggle('ok',drpcOn&&drpcConn);
+  $('drpc-dot').classList.toggle('err',drpcOn&&!drpcConn);
+  $('drpc-txt').textContent=!drpcOn?'Выключено':(drpcConn?'Подключено':'Discord не найден');
+  $('drpc-btn').textContent=drpcOn?'Выключить':'Включить';
 
   // Position
   if(typeof d.pos==='number'){
@@ -2053,6 +2193,7 @@ static void InitWebView(){
                                 else if(msg==L"close")    PostMessageW(g_hub,WM_CLOSE,0,0);
                                 else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
                                 else if(msg==L"confirm-update") std::thread([](){InstallPendingUpdate();}).detach();
+                                else if(msg==L"drpc-toggle"){SaveDiscordSetting(!g_discordEnabled);BroadcastState();}
                                 else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
                                 else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
                                 else if(msg.rfind(L"pos:",0)==0){
@@ -2250,6 +2391,8 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     LoadKeys();
     LoadYmKeys();
     LoadTweaks();
+    LoadDiscordSetting();
+    std::thread(DiscordThreadFn).detach();
     InitIPC();
     g_pos=(Pos)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Pos",(DWORD)Pos::BC);
     if((int)g_pos<0||(int)g_pos>5)g_pos=Pos::BC;
