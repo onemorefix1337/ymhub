@@ -81,6 +81,13 @@ struct YMHubIPC {
     // made outside the hub's own optimistic toggle (YM's native UI,
     // remapped hotkeys, or a track that was already liked on load).
     volatile DWORD ymLiked;
+
+    // DLL -> host: public CDN URL (avatars.yandex.net/avatars.mds.yandex.net)
+    // of the currently playing track's cover, polled from the page every
+    // ~2s (see CdpQueryCoverUrl in dllmain.cpp). Fed to Discord Rich
+    // Presence as an external large_image — Discord's own backend fetches
+    // it directly, so this only ever needs to be a URL, never image bytes.
+    wchar_t coverUrl[512];
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakRules order in

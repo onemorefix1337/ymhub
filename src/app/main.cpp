@@ -429,7 +429,7 @@ static HANDLE g_discordPipe = nullptr;
 static HANDLE g_discordEvt  = nullptr;
 static bool   g_discordEnabled = false;
 static time_t g_discordStart = 0;
-static std::wstring g_discordLastTrack, g_discordLastArtist;
+static std::wstring g_discordLastTrack, g_discordLastArtist, g_discordLastCover;
 static bool g_discordWasSent = false;
 
 static void LoadDiscordSetting(){
@@ -497,24 +497,28 @@ static void DiscordClearActivity(){
 // this file; a torn read here just means presence updates a tick late.
 static void DiscordTick(){
     if(!g_discordEnabled){
-        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();}
+        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();g_discordLastCover.clear();}
         return;}
     if(!g_playing||g_track.empty()){
-        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();}
+        if(g_discordWasSent){DiscordClearActivity();g_discordWasSent=false;g_discordLastTrack.clear();g_discordLastCover.clear();}
         return;}
-    if(g_track==g_discordLastTrack&&g_artist==g_discordLastArtist&&g_discordWasSent)
+    std::wstring cover=g_ipc?g_ipc->coverUrl:L"";
+    if(g_track==g_discordLastTrack&&g_artist==g_discordLastArtist&&cover==g_discordLastCover&&g_discordWasSent)
         return; // nothing actually changed — don't spam SET_ACTIVITY
     if(g_track!=g_discordLastTrack||g_artist!=g_discordLastArtist)g_discordStart=time(nullptr);
     if(!DiscordConnect())return;
     std::string details=ToUtf8(JsonEsc(g_track));
     std::string state  =ToUtf8(JsonEsc(g_artist));
+    std::string assets;
+    if(!cover.empty())
+        assets=",\"assets\":{\"large_image\":\""+ToUtf8(JsonEsc(cover))+"\",\"large_text\":\""+details+"\"}";
     std::string activity=
         "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(GetCurrentProcessId())+
         ",\"activity\":{\"type\":2,\"details\":\""+details+"\",\"state\":\""+state+"\","
-        "\"timestamps\":{\"start\":"+std::to_string((long long)g_discordStart)+"},"
+        "\"timestamps\":{\"start\":"+std::to_string((long long)g_discordStart)+"}"+assets+","
         "\"instance\":false}},\"nonce\":\"ymhub-set\"}";
     if(DiscordSendFrame(1,activity)&&DiscordRecvFrame()){
-        g_discordLastTrack=g_track;g_discordLastArtist=g_artist;g_discordWasSent=true;
+        g_discordLastTrack=g_track;g_discordLastArtist=g_artist;g_discordLastCover=cover;g_discordWasSent=true;
     } else DiscordClose(); // reconnect from scratch next tick
 }
 

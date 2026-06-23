@@ -459,6 +459,32 @@ static bool CdpQueryLiked() {
     return resp.find("\"value\":true") != std::string::npos;
 }
 
+// Polled alongside CdpQueryLiked to feed Discord Rich Presence (see
+// DiscordTick in main.cpp) a per-track cover: the player bar's <img> src
+// is already a public Yandex CDN URL (avatars.yandex.net/...), so it can
+// go straight into Discord's large_image as an external asset — no need
+// to host or proxy the image ourselves. Same selector as TWEAK_BIG_COVER.
+// CDN URLs are plain ASCII, so a byte-widening narrow->wide conversion
+// (same shortcut CdpFindWsPath already uses) is lossless here.
+static std::wstring CdpQueryCoverUrl() {
+    if (!CdpEnsureConnected()) return L"";
+    std::string expr =
+        "(function(){var el=document.querySelector(\"[class*='AlbumCover_cover__']\");"
+        "return el&&el.src?el.src:'';})()";
+    std::string req = "{\"id\":8,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
+        CdpJsonEscape(expr) + "\",\"returnByValue\":true}}";
+    if (!CdpSend(req)) { CdpClose(); return L""; }
+    std::string resp;
+    if (!CdpRecv(resp)) { CdpClose(); return L""; }
+    auto p = resp.find("\"value\":\"");
+    if (p == std::string::npos) return L"";
+    p += 9;
+    auto e = resp.find('"', p);
+    if (e == std::string::npos) return L"";
+    std::string url = resp.substr(p, e - p);
+    return std::wstring(url.begin(), url.end());
+}
+
 static void CdpClickButton(const wchar_t* ariaLabel) {
     if (!CdpEnsureConnected()) return;
     std::string label = CdpUtf8(ariaLabel); // plain text, no special chars to escape
@@ -890,6 +916,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
                 CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
+                wcsncpy_s(g_ipc->coverUrl, CdpQueryCoverUrl().c_str(), _TRUNCATE);
             }
         }
         Sleep(2000);
