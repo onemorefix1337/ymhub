@@ -1720,7 +1720,7 @@ html,body{width:100%;height:100%;overflow:hidden;
 
       <div class='cc-wrap'>
         <div class='cc-title'>Свой CSS</div>
-        <div class='cc-desc'>Полный контроль интерфейса Яндекс Музыки — любые правила CSS, например <code>[class*=&quot;VibePage_wheel__&quot;]{display:none!important}</code>. Применяется сразу, сохраняется между запусками.</div>
+        <div class='cc-desc'>Полный контроль интерфейса Яндекс Музыки — любые правила CSS, например <code>[class*=&quot;VibePage_wheel__&quot;]{display:none!important}</code>. Применяется сразу, сохраняется между запусками. Никогда не писали CSS? <a href='https://onemorefix1337.github.io/ymhub/css-guide.html' target='_blank' style='color:var(--ac)'>Гайд для новичков →</a></div>
         <textarea id='cc-input' class='cc-area' spellcheck='false' placeholder='.selector{ ... }' onchange='send("set-custom-css:"+this.value)'></textarea>
       </div>
     </div>

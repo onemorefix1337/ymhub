@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Свой CSS в YMHub — гайд для новичков</title>
+<link rel="icon" href="favicon.ico">
+<meta name="description" content="Как пользоваться полем «Свой CSS» в YMHub, даже если вы никогда не писали CSS — простыми словами, по шагам, с готовыми примерами для копипасты.">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --ac:#5b8fff;--ac2:#7c6fff;--bg:#05050a;--sb:#020204;
+  --card:rgba(255,255,255,.035);--card2:rgba(255,255,255,.05);--bord:rgba(255,255,255,.07);--bord2:rgba(255,255,255,.1);
+  --txt:rgba(255,255,255,.94);--txt2:rgba(255,255,255,.52);--txt3:rgba(255,255,255,.32);
+  --mono:'Cascadia Code','Consolas',ui-monospace,monospace;
+  --good:#3ddc84;--warn:#ffb84d;
+}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--txt);
+  background-image:radial-gradient(circle at 18% -10%,rgba(91,143,255,.12),transparent 45%),
+    radial-gradient(circle at 85% 0%,rgba(124,111,255,.09),transparent 40%);
+}
+
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  max-width:840px;margin:0 auto;padding:28px 24px 0;
+}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;text-decoration:none;color:var(--txt)}
+.brand .logo{
+  width:30px;height:30px;border-radius:9px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--ac),var(--ac2));
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+  box-shadow:0 4px 16px rgba(91,143,255,.3);
+}
+nav{display:flex;gap:26px;align-items:center}
+nav a{color:var(--txt2);text-decoration:none;font-size:13.5px;font-weight:600;transition:color .15s}
+nav a:hover{color:var(--txt)}
+nav a.gh{color:var(--txt)}
+
+.hero{max-width:760px;margin:0 auto;padding:60px 24px 20px;text-align:center}
+.hero .pill{
+  display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:99px;
+  background:var(--card2);border:1px solid var(--bord2);color:var(--txt2);
+  font-size:12.5px;font-weight:600;margin-bottom:28px;
+}
+.hero h1{
+  font-size:clamp(30px,5.4vw,46px);font-weight:800;line-height:1.12;letter-spacing:-.5px;
+  background:linear-gradient(135deg,#fff 40%,var(--ac2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero p{max-width:560px;margin:20px auto 0;color:var(--txt2);font-size:16px;line-height:1.6}
+
+.wrap{max-width:760px;margin:0 auto;padding:50px 24px}
+.wrap h2{font-size:24px;font-weight:800;letter-spacing:-.3px;margin-bottom:14px}
+.wrap h2 .n{
+  display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9px;
+  background:rgba(91,143,255,.15);color:var(--ac);font-size:14px;margin-right:10px;vertical-align:middle;
+}
+.wrap > p{color:var(--txt2);font-size:14.5px;line-height:1.7;margin-bottom:8px}
+.wrap{border-top:1px solid var(--bord)}
+.wrap:first-of-type{border-top:none}
+
+code,.mono{font-family:var(--mono)}
+.codebox{
+  background:#0a0a12;border:1px solid var(--bord2);border-radius:12px;padding:16px 18px;
+  margin:16px 0;font-family:var(--mono);font-size:13px;line-height:1.7;color:#cdd6f6;overflow-x:auto;
+  white-space:pre-wrap;
+}
+.codebox .sel{color:#7ee787}
+.codebox .prop{color:#a9c4ff}
+.codebox .val{color:#ffb84d}
+.codebox .imp{color:#ff7b9c}
+.codebox .cm{color:var(--txt3)}
+
+.anatomy{margin:22px 0;padding:18px 18px 14px;background:var(--card);border:1px solid var(--bord);border-radius:14px}
+.anatomy .line{font-family:var(--mono);font-size:14px;display:flex;flex-wrap:wrap;gap:0;margin-bottom:14px}
+.anatomy .tag{
+  display:inline-flex;flex-direction:column;align-items:center;gap:6px;padding:0 2px;
+}
+.anatomy .tag .lbl{
+  font-family:'Segoe UI',sans-serif;font-size:11px;font-weight:700;padding:3px 9px;border-radius:7px;white-space:nowrap;
+}
+.anatomy .sel{color:#7ee787}
+.anatomy .sel .lbl{background:rgba(126,231,135,.15);color:#7ee787}
+.anatomy .prop{color:#a9c4ff}
+.anatomy .prop .lbl{background:rgba(169,196,255,.15);color:#a9c4ff}
+.anatomy .val{color:#ffb84d}
+.anatomy .val .lbl{background:rgba(255,184,77,.15);color:#ffb84d}
+.anatomy .punct{color:var(--txt3);padding:0 1px}
+
+.steps{margin-top:20px;display:flex;flex-direction:column;gap:12px}
+.step{display:flex;gap:16px;align-items:flex-start;padding:16px;border-radius:14px;background:var(--card);border:1px solid var(--bord)}
+.step .n{
+  width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--ac),var(--ac2));
+  color:#fff;font-weight:700;font-size:12.5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;
+}
+.step b{font-size:14px;display:block;margin-bottom:3px}
+.step span{font-size:13px;color:var(--txt2);line-height:1.55}
+.step code{font-size:12.5px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px;color:#a9c4ff}
+
+.note{
+  margin:20px 0;display:flex;gap:14px;padding:18px 20px;border-radius:14px;
+  background:rgba(91,143,255,.07);border:1px solid rgba(91,143,255,.18);
+}
+.note.warn{background:rgba(255,184,77,.08);border-color:rgba(255,184,77,.22)}
+.note .nico{font-size:18px;flex-shrink:0;line-height:1.3}
+.note p{font-size:13.5px;color:var(--txt2);line-height:1.6}
+.note b{color:var(--txt)}
+
+.recipes{margin-top:20px;display:flex;flex-direction:column;gap:12px}
+.recipe{background:var(--card);border:1px solid var(--bord);border-radius:14px;padding:16px 18px}
+.recipe .rh{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.recipe h4{font-size:14px;font-weight:700}
+.recipe .tag2{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:7px;color:var(--txt2);background:var(--card2);border:1px solid var(--bord2);flex-shrink:0}
+.recipe .tag2.stable{color:var(--good);border-color:rgba(61,220,132,.3);background:rgba(61,220,132,.08)}
+.recipe pre{
+  font-family:var(--mono);font-size:12.5px;background:#0a0a12;border:1px solid var(--bord2);
+  border-radius:10px;padding:12px 14px;color:#cdd6f6;overflow-x:auto;white-space:pre-wrap;word-break:break-all;
+}
+.recipe .rdesc{font-size:12.5px;color:var(--txt2);margin-top:9px;line-height:1.55}
+.copybtn{
+  margin-top:10px;font-size:12px;font-weight:600;color:var(--ac);background:none;border:none;cursor:pointer;
+  padding:0;display:inline-flex;align-items:center;gap:5px;
+}
+.copybtn:hover{color:var(--ac2)}
+
+.faq{margin-top:20px;display:flex;flex-direction:column;gap:10px}
+details{background:var(--card);border:1px solid var(--bord);border-radius:14px;padding:4px 20px}
+details summary{
+  cursor:pointer;list-style:none;padding:16px 0;font-weight:700;font-size:14px;
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+}
+details summary::-webkit-details-marker{display:none}
+details summary::after{content:'+';font-size:20px;color:var(--txt3);font-weight:400;transition:transform .2s;flex-shrink:0}
+details[open] summary::after{transform:rotate(45deg)}
+details p{font-size:13.5px;color:var(--txt2);line-height:1.65;padding-bottom:18px}
+details code{font-size:12.5px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px;color:#a9c4ff}
+
+footer{max-width:840px;margin:0 auto;padding:50px 24px 60px;text-align:center;color:var(--txt3);font-size:12.5px}
+footer a{color:var(--txt2);text-decoration:none}
+footer a:hover{color:var(--ac)}
+</style>
+</head>
+<body>
+
+<header>
+  <a class="brand" href="index.html"><div class="logo">♪</div>YMHub</a>
+  <nav>
+    <a href="index.html">← Главная</a>
+    <a class="gh" href="https://github.com/onemorefix1337/ymhub" target="_blank" rel="noopener">GitHub →</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <div class="pill"><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--good);display:inline-block;box-shadow:0 0 7px rgba(61,220,132,.6)"></span>Гайд · без знания CSS</div>
+  <h1>Поле «Свой CSS», объяснённое<br>на пальцах</h1>
+  <p>Вкладка «Твики» в YMHub даёт текстовое поле, в которое можно вписать
+     любое правило CSS и изменить интерфейс Яндекс Музыки так, как не
+     умеет ни один из 9 готовых переключателей. Этот гайд — для тех, кто
+     ни разу не писал CSS и хочет разобраться по шагам.</p>
+</section>
+
+<section class="wrap" style="border-top:none">
+  <h2><span class="n">1</span>Из чего состоит одна строчка CSS</h2>
+  <p>Любое правило CSS выглядит одинаково: «кому» — «что» — «на сколько».
+     Вот реальный пример, который можно вставить в «Свой CSS» прямо сейчас —
+     он прячет цветной анимированный фон на странице «Моя волна»:</p>
+
+  <div class="anatomy">
+    <div class="line">
+      <span class="tag sel">[data-test-id="VIBE_ANIMATION"]<span class="lbl">селектор — кому</span></span><span class="punct">&nbsp;{&nbsp;</span><span class="tag prop">display<span class="lbl">свойство — что</span></span><span class="punct">:&nbsp;</span><span class="tag val">none<span class="lbl">значение — на что</span></span><span class="punct">&nbsp;!important;&nbsp;}</span>
+    </div>
+  </div>
+
+  <p><b style="color:var(--txt)">Селектор</b> — какому элементу на странице адресовано правило.
+     <b style="color:var(--txt)">Свойство</b> — что именно меняем (видимость, размер, цвет...).
+     <b style="color:var(--txt)">Значение</b> — на что меняем. <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">!important</code>
+     означает «применить обязательно, даже если у Яндекс Музыки уже есть своё правило на этот счёт» —
+     без него ваше правило иногда может быть тише собственных стилей страницы и просто не подействовать.</p>
+
+  <div class="note warn">
+    <div class="nico">⚠</div>
+    <p><b>Важно:</b> если забыть точку с запятой или одну из скобок <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">{ }</code> —
+       браузer не покажет никакой ошибки. Правило просто молча не применится. Если что-то
+       «не работает» — первым делом проверьте именно это.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2><span class="n">2</span>Как найти свой селектор</h2>
+  <p>Селектор для готовых примеров ниже уже есть, но рано или поздно вы захотите
+     спрятать или изменить что-то своё. YMHub уже открывает технический доступ
+     к странице Яндекс Музыки (через него же работают лайки и твики), и этим
+     можно воспользоваться, чтобы посмотреть на разметку страницы вживую —
+     без установки чего-либо ещё.</p>
+
+  <div class="steps">
+    <div class="step"><div class="n">1</div><div><b>Запустите YMHub и Яндекс Музыку</b><span>Подождите несколько секунд, пока YMHub подключится (плеер на вкладке «Плеер» должен показать текущий трек).</span></div></div>
+    <div class="step"><div class="n">2</div><div><b>Откройте обычный Chrome и перейдите на <code>127.0.0.1:9876</code></b><span>Это локальный адрес внутри вашего компьютера — откроется список страниц, к которым подключён YMHub.</span></div></div>
+    <div class="step"><div class="n">3</div><div><b>Кликните по странице «Яндекс Музыка»</b><span>Откроются настоящие инструменты разработчика Chrome — те же, что встроены в любой браузер.</span></div></div>
+    <div class="step"><div class="n">4</div><div><b>Включите инструмент «Inspect»</b><span>Иконка курсора в левом верхнем углу панели DevTools (или <code>Ctrl+Shift+C</code>), затем кликните по нужному элементу прямо на странице Яндекс Музыки.</span></div></div>
+    <div class="step"><div class="n">5</div><div><b>Посмотрите на подсветившийся HTML</b><span>Там будет что-то вроде <code>class="qQ7GQU14Ekgg AlbumCover_cover__DhS1R"</code> — нужная часть для селектора находится именно тут.</span></div></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2><span class="n">3</span>Главная ловушка — «случайные» классы</h2>
+  <p>Если в инспекторе вы увидели класс вроде <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">AlbumCover_cover__DhS1R</code> —
+     последняя часть после двойного подчёркивания (<code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">DhS1R</code>)
+     не опечатка и не что-то особенное лично для вас. Это случайный набор символов, который Яндекс
+     генерирует при каждой сборке приложения — и он меняется при следующем же обновлении Яндекс Музыки.</p>
+
+  <div class="codebox">
+<span class="cm">// Сломается при следующем обновлении ЯМ — хэш «DhS1R» поменяется:</span>
+<span class="sel">.AlbumCover_cover__DhS1R</span> { <span class="prop">display</span>: <span class="val">none</span><span class="imp"> !important</span>; }
+
+<span class="cm">// Переживёт обновление — мы просим "содержит", а не "равно ровно этому":</span>
+<span class="sel">[class*="AlbumCover_cover__"]</span> { <span class="prop">display</span>: <span class="val">none</span><span class="imp"> !important</span>; }
+  </div>
+
+  <p>Квадратные скобки <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">[class*="..."]</code> означают
+     «класс, который <i>содержит</i> эту подстроку» — а не «равен ей в точности». Достаточно взять
+     стабильную часть имени до <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">__</code> и
+     отбросить случайный хвост — тогда правило продолжит работать и после обновлений, пока
+     Яндекс не переименует сам компонент целиком (а это случается заметно реже, чем пересборка).</p>
+
+  <div class="note">
+    <div class="nico">💡</div>
+    <p><b>Бонус-приём:</b> иногда у элемента в инспекторе есть атрибут <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">data-test-id</code>
+       или <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">data-testid</code> —
+       такие атрибуты почти всегда стабильнее любого класса (они существуют специально для автотестов
+       Яндекса и переименовываются гораздо реже). Если видите такой атрибут — берите его вместо класса.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2><span class="n">4</span>Готовые примеры — просто скопируйте</h2>
+  <p>Шесть рабочих правил, которые можно вставить в поле «Свой CSS» прямо сейчас.
+     Можно вписать сразу несколько — каждое на новой строке, как в обычном CSS-файле.</p>
+
+  <div class="recipes">
+    <div class="recipe">
+      <div class="rh"><h4>Скрыть AI-комментарий под плеером</h4><span class="tag2">класс + хэш</span></div>
+      <pre>[class*="VibePage_words__"]{display:none!important;}</pre>
+      <div class="rdesc">Та самая подсказка со искрой под названием трека на «Моей волне».</div>
+    </div>
+    <div class="recipe">
+      <div class="rh"><h4>Скрыть цветной анимированный фон</h4><span class="tag2 stable">data-test-id</span></div>
+      <pre>[data-test-id="VIBE_ANIMATION"]{display:none!important;}</pre>
+      <div class="rdesc">Атрибут вместо класса — переживёт обновления Яндекс Музыки без правок.</div>
+    </div>
+    <div class="recipe">
+      <div class="rh"><h4>Скрыть плашку «Вышла новая версия»</h4><span class="tag2">класс + хэш</span></div>
+      <pre>[class*="MainPage_betaSlot__"]{display:none!important;}</pre>
+      <div class="rdesc">Кнопка с заметками об обновлении в углу главного экрана.</div>
+    </div>
+    <div class="recipe">
+      <div class="rh"><h4>Скрыть Плюс-бейдж в профиле</h4><span class="tag2 stable">data-test-id</span></div>
+      <pre>[data-test-id="USER_PROFILE_PLUS_BADGE"]{display:none!important;}</pre>
+      <div class="rdesc">Ссылку на подписку рядом с именем профиля в сайдбаре.</div>
+    </div>
+    <div class="recipe">
+      <div class="rh"><h4>Скрыть конкретный раздел меню</h4><span class="tag2 stable">data-test-id</span></div>
+      <pre>[data-test-id="NAVBAR_NAVIGATION_ITEM_CONCERTS"]{display:none!important;}</pre>
+      <div class="rdesc">Здесь это «Концерты» — для «Книг и подкастов» возьмите <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">NAVBAR_NAVIGATION_ITEM_NON_MUSIC</code>, для «Для вас и Тренды» — <code style="background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px">NAVBAR_NAVIGATION_ITEM_FOR_YOU_AND_TRENDS</code>.</div>
+    </div>
+    <div class="recipe">
+      <div class="rh"><h4>Сделать обложку трека круглой</h4><span class="tag2">класс + хэш</span></div>
+      <pre>[class*="AlbumCover_cover__"]{border-radius:50%!important;}</pre>
+      <div class="rdesc">CSS — это не только «скрыть». Тот же селектор, что у твика «Крупная обложка», но другое свойство.</div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2><span class="n">5</span>Частые вопросы</h2>
+  <div class="faq">
+    <details>
+      <summary>Я вставил правило, но ничего не изменилось</summary>
+      <p>Сначала проверьте точку с запятой и обе скобки <code>{ }</code> — опечатка в CSS никогда не
+         показывает ошибку, просто тихо ничего не делает. Если синтаксис в порядке — возможно, классу
+         нужен <code>!important</code>, либо после обновления Яндекс Музыки изменился хэш в классе:
+         откройте инспектор (раздел 2) и проверьте селектор заново.</p>
+    </details>
+    <details>
+      <summary>Как отменить изменения и вернуть всё как было</summary>
+      <p>Просто очистите поле «Свой CSS» и кликните в любое другое место — правило применяется заново
+         при каждом изменении, а пустое поле ничего не добавляет к встроенным твикам.</p>
+    </details>
+    <details>
+      <summary>Можно ли что-то сломать насовсем?</summary>
+      <p>Нет. Это обычный CSS, который существует только в окне приложения, пока работает YMHub —
+         он ничего не отправляет на серверы Яндекса и не трогает файлы самой программы. Если результат
+         не понравился — очистите поле, и всё вернётся в исходный вид.</p>
+    </details>
+    <details>
+      <summary>А JavaScript или анимации можно?</summary>
+      <p>Нет, поле принимает только правила CSS, без какой-либо логики или скриптов — это сделано
+         специально, чтобы поле было безопасным для произвольного текста.</p>
+    </details>
+    <details>
+      <summary><span>Почему именно <code>127.0.0.1:9876</code>?</span></summary>
+      <p>YMHub подключается к Яндекс Музыке через стандартный Chrome DevTools Protocol — на этом порту
+         он открывает обычный, ничем не урезанный интерфейс инструментов разработчика. Это тот же порт,
+         которым пользуется сама DLL внутри YMHub, просто открытый и для вас.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  YMHub — независимый проект, не связан с «Яндексом». Исходный код открыт.<br>
+  <a href="https://github.com/onemorefix1337/ymhub" target="_blank" rel="noopener">github.com/onemorefix1337/ymhub</a>
+</footer>
+
+</body>
+</html>
