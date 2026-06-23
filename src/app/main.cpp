@@ -122,7 +122,11 @@ static void RegSetDW(HKEY root,const wchar_t* k,const wchar_t* v,DWORD d){
     RegSetValueExW(hk,v,0,REG_DWORD,(BYTE*)&d,sizeof(d));
     RegCloseKey(hk);}
 static std::wstring RegGetStr(HKEY root,const wchar_t* k,const wchar_t* v){
-    HKEY hk;wchar_t buf[64]={0};DWORD sz=sizeof(buf);
+    // Big enough for both the short CustomName value and the much longer
+    // CustomCss one — RegQueryValueExW fails outright (not just truncates)
+    // if the buffer is smaller than the stored value, so this has to cover
+    // the largest user-editable string field (see customCss in ipc.h).
+    HKEY hk;wchar_t buf[4096]={0};DWORD sz=sizeof(buf);
     if(RegOpenKeyExW(root,k,0,KEY_READ,&hk)==ERROR_SUCCESS){
         if(RegQueryValueExW(hk,v,nullptr,nullptr,(BYTE*)buf,&sz)!=ERROR_SUCCESS)buf[0]=0;
         RegCloseKey(hk);}
@@ -184,13 +188,18 @@ static DWORD g_tweaksMask=0;
 // Replacement text for TWEAK_HIDE_NAME — empty means the DLL falls back to
 // "Скрыто" itself (see CdpApplyNameHide in dllmain.cpp).
 static std::wstring g_customName;
+// Arbitrary user CSS from the "Свой CSS" box — appended to the built-in
+// tweak rules so the user isn't limited to the canned toggle list.
+static std::wstring g_customCss;
 static void LoadTweaks(){
     g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);
-    g_customName=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName");}
+    g_customName=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName");
+    g_customCss=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomCss");}
 static void PushTweaksToIPC(){
     if(!g_ipc)return;
     g_ipc->tweaksMask=g_tweaksMask;
     wcsncpy_s(g_ipc->customName,g_customName.c_str(),_TRUNCATE);
+    wcsncpy_s(g_ipc->customCss,g_customCss.c_str(),_TRUNCATE);
     InterlockedIncrement(&g_ipc->tweaksSeq);}
 static void SaveTweaks(){
     RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
@@ -198,6 +207,10 @@ static void SaveTweaks(){
 static void SaveCustomName(const std::wstring& s){
     g_customName=s;
     RegSetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName",g_customName);
+    PushTweaksToIPC();}
+static void SaveCustomCss(const std::wstring& s){
+    g_customCss=s;
+    RegSetStr(HKEY_CURRENT_USER,REG_APP,L"CustomCss",g_customCss);
     PushTweaksToIPC();}
 
 // Default VK codes for YM's own "Горячие клавиши", in the same order as
@@ -442,7 +455,8 @@ static void SendHubYmKeys(){
 static void SendHubTweaks(){
     if(!g_hubWv)return;
     std::wstring msg=L"{\"type\":\"init-tweaks\",\"mask\":"+std::to_wstring(g_tweaksMask)+
-        L",\"customName\":\""+JsonEsc(g_customName)+L"\"}";
+        L",\"customName\":\""+JsonEsc(g_customName)+L"\""
+        L",\"customCss\":\""+JsonEsc(g_customCss)+L"\"}";
     g_hubWv->PostWebMessageAsString(msg.c_str());}
 
 // ── IPC / DLL injection ───────────────────────────────────
@@ -1350,6 +1364,18 @@ html,body{width:100%;height:100%;overflow:hidden;
 .tw-input:focus{border-color:rgba(91,143,255,.4);}
 .tw-row.on .tw-input{display:block;}
 
+.cc-wrap{margin-top:18px;padding:16px;border-radius:14px;background:var(--card);border:1px solid var(--bord);}
+.cc-title{font-size:14px;font-weight:700;margin-bottom:4px;}
+.cc-desc{font-size:12px;color:var(--txt2);line-height:1.55;margin-bottom:12px;}
+.cc-desc code{font-family:Consolas,'Cascadia Code',monospace;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px;}
+.cc-area{
+  width:100%;min-height:130px;resize:vertical;
+  background:rgba(255,255,255,.05);border:1px solid var(--bord);border-radius:8px;
+  color:var(--txt);font-size:12.5px;font-family:Consolas,'Cascadia Code',monospace;
+  padding:10px 12px;outline:none;line-height:1.5;
+}
+.cc-area:focus{border-color:rgba(91,143,255,.4);}
+
 /* ── Update confirmation modal ── */
 #upd-scrim{
   position:fixed;inset:0;z-index:100;display:none;
@@ -1554,6 +1580,12 @@ html,body{width:100%;height:100%;overflow:hidden;
       <div class='tab-title'>Твики</div>
       <div class='tab-sub'>Скрыть отдельные элементы интерфейса Яндекс Музыки — применяется сразу</div>
       <div id='tweak-rows'></div>
+
+      <div class='cc-wrap'>
+        <div class='cc-title'>Свой CSS</div>
+        <div class='cc-desc'>Полный контроль интерфейса Яндекс Музыки — любые правила CSS, например <code>[class*=&quot;VibePage_wheel__&quot;]{display:none!important}</code>. Применяется сразу, сохраняется между запусками.</div>
+        <textarea id='cc-input' class='cc-area' spellcheck='false' placeholder='.selector{ ... }' onchange='send("set-custom-css:"+this.value)'></textarea>
+      </div>
     </div>
 
     <!-- ── About tab ── -->
@@ -1761,7 +1793,7 @@ const TWEAK_INFO=[
   {n:'Крупная обложка трека',d:'Увеличивает обложку на странице «Моя волна»'},
   {n:'Скрыть имя пользователя',d:'Своё имя вместо настоящего, или просто «Скрыто»',input:true}
 ];
-let tweaksMask=0,customName='';
+let tweaksMask=0,customName='',customCss='';
 function renderTweaks(){
   // Built once; later mask updates only flip the .on class on the existing
   // switch nodes (see applyTweaksMask) so the CSS transition actually has
@@ -1919,7 +1951,11 @@ window.chrome.webview.addEventListener('message',e=>{
   if(d.type==='state'){updateState(d);if(d.ver)$('about-ver').textContent=d.ver;return;}
   if(d.type==='init-keys'){keys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<6;i++)renderCombo(i);return;}
   if(d.type==='init-ymkeys'){ymKeys=d.keys.map(k=>({m:k.m,v:k.v}));for(let i=0;i<13;i++)renderYmCombo(i);return;}
-  if(d.type==='init-tweaks'){tweaksMask=d.mask;customName=d.customName||'';renderTweaks();return;}
+  if(d.type==='init-tweaks'){
+    tweaksMask=d.mask;customName=d.customName||'';renderTweaks();
+    customCss=d.customCss||'';
+    const cc=$('cc-input');if(cc&&document.activeElement!==cc)cc.value=customCss;
+    return;}
   if(d.type==='update-status'){
     if(d.current)$('about-ver').textContent=d.current;
     if(d.state==='checking'){$('upd-txt').textContent='Проверка...';}
@@ -2045,7 +2081,9 @@ static void InitWebView(){
                                         g_tweaksMask^=(1u<<idx);
                                         SaveTweaks();SendHubTweaks();}}
                                 else if(msg.rfind(L"set-custom-name:",0)==0){
-                                    SaveCustomName(msg.substr(16));}}
+                                    SaveCustomName(msg.substr(16));}
+                                else if(msg.rfind(L"set-custom-css:",0)==0){
+                                    SaveCustomCss(msg.substr(15));}}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(

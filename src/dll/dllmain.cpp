@@ -555,16 +555,30 @@ static const char* kTweakRules[8] = {
     "[class*='AlbumCover_cover__']{border-radius:16px!important;}"
     "[class*='VibePage_entityMetaBody__']{transform:translateY(-24px)!important;}",
 };
-static void CdpApplyTweaks(DWORD mask) {
+// customCssW is arbitrary user-typed text (the "Свой CSS" box), unlike
+// kTweakRules' own developer-written entries, so the combined string can
+// no longer go into a backtick template literal as-is (a stray backtick
+// or ${...} in the user's CSS would break the generated JS). Escaped into
+// a normal quoted JS string instead — safe for any input.
+static void CdpApplyTweaks(DWORD mask, const wchar_t* customCssW) {
     if (!CdpEnsureConnected()) return;
     std::string css;
     for (int i = 0; i < 8; i++) {
         if (mask & (1u << i)) css += kTweakRules[i];
     }
+    if (customCssW && customCssW[0]) css += CdpUtf8(customCssW);
+    std::string esc; esc.reserve(css.size());
+    for (unsigned char c : css) {
+        if (c == '\\') esc += "\\\\";
+        else if (c == '"') esc += "\\\"";
+        else if (c == '\n') esc += "\\n";
+        else if (c == '\r') continue;
+        else esc += (char)c;
+    }
     std::string js =
         "(function(){var s=document.getElementById('ymhub-tweaks-style');"
         "if(!s){s=document.createElement('style');s.id='ymhub-tweaks-style';document.head.appendChild(s);}"
-        "s.textContent=`" + css + "`;})()";
+        "s.textContent=\"" + esc + "\";})()";
     CdpRunJs(js);
 }
 
@@ -872,7 +886,7 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
             if (g_ipc) {
-                CdpApplyTweaks(g_ipc->tweaksMask);
+                CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
                 CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
                 g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
@@ -935,7 +949,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         LONG ts = InterlockedCompareExchange(&g_ipc->tweaksSeq, 0, 0);
         if (ts != g_lastTweaksSeq) {
             g_lastTweaksSeq = ts;
-            CdpApplyTweaks(g_ipc->tweaksMask);
+            CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
             CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
             CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
         }

@@ -70,6 +70,12 @@ struct YMHubIPC {
     // the DLL substitutes its own default ("Скрыто") instead.
     wchar_t customName[32];
 
+    // Host -> DLL: arbitrary user-written CSS from the "Свой CSS" box on
+    // the Твики tab, appended to kTweakRules' output in the same <style>
+    // tag (see CdpApplyTweaks in dllmain.cpp) — lets the user customize
+    // anything CSS can reach instead of waiting on a built-in toggle for it.
+    wchar_t customCss[4096];
+
     // DLL -> host: real liked state of the current track, polled from YM's
     // own DOM every ~2s (see CdpQueryLiked in dllmain.cpp) — covers likes
     // made outside the hub's own optimistic toggle (YM's native UI,
