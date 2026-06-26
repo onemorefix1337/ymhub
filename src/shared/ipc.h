@@ -101,6 +101,12 @@ struct YMHubIPC {
     // (see HandleUiMessage in main.cpp) so there's only one parser.
     volatile LONG reqSeq;
     wchar_t       reqText[4160];
+
+    // Host -> DLL: opt-in switch for the in-page cheat menu itself (see
+    // the "Меню в Яндекс Музыке" card on the Плагины tab). Off by default
+    // — when off, CdpInjectMenu tears down its DOM/listeners instead of
+    // building them, so a disabled menu leaves nothing behind in the page.
+    volatile DWORD cheatMenuEnabled;
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakRules order in

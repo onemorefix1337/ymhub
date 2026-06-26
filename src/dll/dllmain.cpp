@@ -842,57 +842,127 @@ static const wchar_t* kTweakLabels[9] = {
     L"Плюс-бейдж в профиле", L"Крупная обложка трека", L"Скрыть имя пользователя",
 };
 
+// Tears down the overlay's DOM/style/listeners entirely instead of just
+// leaving them inert — a disabled "feature" that still has a live
+// document-wide keydown/keyup hook installed wouldn't really be off.
+static void CdpRemoveMenu() {
+    std::string js =
+        "(function(){"
+        "var r=document.getElementById('ymhub-cheat');if(r)r.remove();"
+        "var s=document.getElementById('ymhub-cheat-style');if(s)s.remove();"
+        "if(window.__ymhubShiftDown){"
+        "document.removeEventListener('keydown',window.__ymhubShiftDown,true);"
+        "document.removeEventListener('keyup',window.__ymhubShiftUp,true);"
+        "window.__ymhubShiftDown=null;window.__ymhubShiftUp=null;}"
+        "})()";
+    CdpRunJs(js);
+}
+
 static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
     std::wstring js;
     js += L"(function(){"
         L"var ROOT=document.getElementById('ymhub-cheat');"
         L"if(!ROOT){"
         L"var st=document.createElement('style');st.id='ymhub-cheat-style';"
+        // Same design tokens as the standalone hub window (--ac/--ac2/
+        // --card/--bord/--txt/--txt2 in main.cpp's HTML_HUB) so the
+        // overlay reads as the same product, not a generic dark panel.
         L"st.textContent="
         L"'#ymhub-cheat{position:fixed;top:18px;right:18px;z-index:999998;width:300px;"
-        L"font:13px -apple-system,Segoe UI,sans-serif;opacity:0;pointer-events:none;"
-        L"transform:translateX(12px);transition:opacity .18s ease,transform .18s ease;}"
+        L"font-family:\"Segoe UI Variable Text\",\"Segoe UI\",system-ui,sans-serif;"
+        L"opacity:0;pointer-events:none;transform:translateX(12px);"
+        L"transition:opacity .18s ease,transform .18s ease;}"
         L"#ymhub-cheat.open{opacity:1;pointer-events:auto;transform:translateX(0);}"
         L"#ymhub-cheat .yc-panel{max-height:calc(100vh - 36px);overflow:auto;"
-        L"background:rgba(13,13,20,.92);backdrop-filter:blur(20px);"
-        L"border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;color:#fff;}"
+        L"background:#0d0d14;backdrop-filter:blur(20px);"
+        L"border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;"
+        L"color:rgba(255,255,255,.88);}"
         L"#ymhub-cheat .yc-head{display:flex;align-items:center;justify-content:space-between;"
         L"font-weight:700;font-size:13.5px;margin-bottom:12px;}"
-        L"#ymhub-cheat .yc-hint{font-weight:500;font-size:11px;color:rgba(255,255,255,.45);cursor:pointer;}"
-        L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:10px;}"
-        L"#ymhub-cheat .yc-cover{width:46px;height:46px;border-radius:9px;background:rgba(255,255,255,.08);"
+        L"#ymhub-cheat .yc-hint{font-weight:500;font-size:11px;color:rgba(255,255,255,.4);cursor:pointer;}"
+        L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:12px;}"
+        L"#ymhub-cheat .yc-cover{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.05);"
         L"object-fit:cover;flex-shrink:0;}"
         L"#ymhub-cheat .yc-meta{overflow:hidden;}"
-        L"#ymhub-cheat .yc-title{font-weight:700;font-size:12.5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
-        L"#ymhub-cheat .yc-artist{font-size:11.5px;color:rgba(255,255,255,.5);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
-        L"#ymhub-cheat .yc-controls{display:flex;gap:6px;margin-bottom:14px;}"
-        L"#ymhub-cheat .yc-controls button{flex:1;height:30px;border:none;border-radius:8px;cursor:pointer;"
-        L"background:rgba(255,255,255,.07);color:#fff;font-size:13px;}"
-        L"#ymhub-cheat .yc-controls button.on{color:#5b8fff;background:rgba(91,143,255,.18);}"
-        L"#ymhub-cheat .yc-controls button:hover{background:rgba(255,255,255,.13);}"
-        L"#ymhub-cheat .yc-sep{height:1px;background:rgba(255,255,255,.08);margin:10px 0 12px;}"
-        L"#ymhub-cheat .yc-sectitle{font-weight:700;font-size:11.5px;color:rgba(255,255,255,.55);"
-        L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:8px;}"
-        L"#ymhub-cheat .yc-tw-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;cursor:pointer;}"
-        L"#ymhub-cheat .yc-tw-row input{accent-color:#5b8fff;flex-shrink:0;}"
-        L"#ymhub-cheat .yc-css{width:100%;min-height:70px;resize:vertical;margin-top:6px;"
+        L"#ymhub-cheat .yc-title{font-weight:600;font-size:12.5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
+        L"#ymhub-cheat .yc-artist{font-size:11.5px;color:rgba(255,255,255,.4);white-space:nowrap;"
+        L"text-overflow:ellipsis;overflow:hidden;margin-top:2px;}"
+        // .yc-cb/.yc-skip/.yc-play/.yc-like/.yc-dislike mirror the
+        // mini-player overlay's own .cb/.skip/#pbtn/#btn-like/#btn-dislike
+        // (same file, the HTML constant) — same shapes, same hover/active
+        // feel, just sized for this panel's 300px width.
+        L"#ymhub-cheat .yc-controls{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:14px;}"
+        L"#ymhub-cheat .yc-cb{border:none;cursor:pointer;border-radius:50%;flex-shrink:0;"
+        L"display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.65);"
+        L"background:rgba(255,255,255,.06);transition:transform .15s,background .15s,color .15s;}"
+        L"#ymhub-cheat .yc-cb:hover{background:rgba(255,255,255,.13);color:#fff;transform:scale(1.07);}"
+        L"#ymhub-cheat .yc-cb:active{transform:scale(.88);}"
+        L"#ymhub-cheat .yc-skip{width:30px;height:30px;}"
+        L"#ymhub-cheat .yc-play{width:38px;height:38px;"
+        L"background:linear-gradient(135deg,#5b8fff,#7c6fff);color:#fff;}"
+        L"#ymhub-cheat .yc-play:hover{filter:brightness(1.1);transform:scale(1.06);}"
+        L"#ymhub-cheat .yc-like{width:30px;height:30px;color:rgba(255,255,255,.4);}"
+        L"#ymhub-cheat .yc-like:hover{background:rgba(255,80,100,.18);color:rgba(255,100,120,.9);}"
+        L"#ymhub-cheat .yc-like.on{background:rgba(255,60,90,.22);color:#ff4d6d;}"
+        L"#ymhub-cheat .yc-dislike{width:30px;height:30px;color:rgba(255,255,255,.3);}"
+        L"#ymhub-cheat .yc-dislike:hover{background:rgba(255,255,255,.12);color:rgba(255,255,255,.7);}"
+        L"#ymhub-cheat .yc-sep{height:1px;background:rgba(255,255,255,.08);margin:0 0 12px;}"
+        L"#ymhub-cheat .yc-sectitle{font-weight:700;font-size:11px;color:rgba(255,255,255,.4);"
+        L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px;}"
+        // .yc-tw-row/.yc-tw-switch/.yc-knob mirror the hub's own
+        // .tw-row/.tw-switch/.knob (same file) pixel-for-pixel in spirit —
+        // a real sliding toggle, not a native checkbox.
+        L"#ymhub-cheat .yc-tw-row{display:flex;align-items:center;gap:10px;padding:8px 0;"
+        L"border-bottom:1px solid rgba(255,255,255,.08);}"
+        L"#ymhub-cheat .yc-tw-row:last-child{border-bottom:none;}"
+        L"#ymhub-cheat .yc-tw-name{flex:1;font-size:12px;}"
+        L"#ymhub-cheat .yc-tw-switch{position:relative;width:32px;height:19px;flex-shrink:0;border-radius:99px;"
+        L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);cursor:pointer;"
+        L"transition:background .35s ease,border-color .35s ease;}"
+        L"#ymhub-cheat .yc-tw-switch.on{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
+        L"#ymhub-cheat .yc-knob{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;"
+        L"background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:left .35s cubic-bezier(.34,1.56,.64,1);}"
+        L"#ymhub-cheat .yc-tw-switch.on .yc-knob{left:17px;}"
+        // .yc-cc/.yc-css mirror the hub's .cc-wrap/.cc-area.
+        L"#ymhub-cheat .yc-cc{margin-top:14px;padding:12px;border-radius:12px;"
+        L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);}"
+        L"#ymhub-cheat .yc-cc-title{font-size:12px;font-weight:700;margin-bottom:8px;}"
+        L"#ymhub-cheat .yc-css{width:100%;min-height:64px;resize:vertical;"
         L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px;"
-        L"color:#fff;font:11.5px Consolas,monospace;padding:8px;box-sizing:border-box;}';"
+        L"color:rgba(255,255,255,.88);font:11px Consolas,\"Cascadia Code\",monospace;"
+        L"padding:8px;box-sizing:border-box;outline:none;}"
+        L"#ymhub-cheat .yc-css:focus{border-color:rgba(91,143,255,.4);}';"
         L"document.head.appendChild(st);"
         L"ROOT=document.createElement('div');ROOT.id='ymhub-cheat';"
+        // Icon paths copied verbatim from the mini-player overlay's own
+        // #btn-prev/#pbtn/#btn-next/#btn-like/#btn-dislike SVGs (same
+        // file) — real shapes instead of Unicode glyphs, which render
+        // inconsistently across fonts at small sizes.
         L"ROOT.innerHTML="
         L"'<div class=\"yc-panel\">"
         L"<div class=\"yc-head\">YMHub <span class=\"yc-hint\" id=\"yc-close\">Shift — закрыть</span></div>"
         L"<div class=\"yc-player\"><img class=\"yc-cover\" id=\"yc-cover\"><div class=\"yc-meta\">"
         L"<div class=\"yc-title\" id=\"yc-title\">—</div><div class=\"yc-artist\" id=\"yc-artist\"></div></div></div>"
         L"<div class=\"yc-controls\">"
-        L"<button id=\"yc-prev\">\\u23EE</button><button id=\"yc-play\">\\u25B6</button>"
-        L"<button id=\"yc-next\">\\u23ED</button><button id=\"yc-like\">\\u2665</button>"
-        L"<button id=\"yc-dislike\">\\u2715</button></div>"
+        L"<button class=\"yc-cb yc-skip\" id=\"yc-prev\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 15 15\" fill=\"currentColor\">"
+        L"<rect x=\"1.5\" y=\"1.5\" width=\"2.5\" height=\"12\" rx=\"1.1\"/><path d=\"M13 2.5 5.5 7.5 13 12.5V2.5z\"/></svg></button>"
+        L"<button class=\"yc-cb yc-play\" id=\"yc-play\">"
+        L"<svg id=\"yc-i-play\" width=\"15\" height=\"15\" viewBox=\"0 0 17 17\" fill=\"currentColor\"><path d=\"M5.5 3.5 14 8.5 5.5 13.5V3.5z\"/></svg>"
+        L"<svg id=\"yc-i-pause\" width=\"15\" height=\"15\" viewBox=\"0 0 17 17\" fill=\"currentColor\" style=\"display:none\">"
+        L"<rect x=\"3.5\" y=\"3\" width=\"3.2\" height=\"11\" rx=\"1.3\"/><rect x=\"10.3\" y=\"3\" width=\"3.2\" height=\"11\" rx=\"1.3\"/></svg></button>"
+        L"<button class=\"yc-cb yc-skip\" id=\"yc-next\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 15 15\" fill=\"currentColor\">"
+        L"<rect x=\"11\" y=\"1.5\" width=\"2.5\" height=\"12\" rx=\"1.1\"/><path d=\"M2 2.5l7.5 5L2 12.5V2.5z\"/></svg></button>"
+        L"<button class=\"yc-cb yc-like\" id=\"yc-like\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
+        L"<path d=\"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 "
+        L"19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z\"/></svg></button>"
+        L"<button class=\"yc-cb yc-dislike\" id=\"yc-dislike\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
+        L"<path d=\"M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 "
+        L".41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z\"/></svg></button>"
+        L"</div>"
         L"<div class=\"yc-sep\"></div><div class=\"yc-sectitle\">Твики</div>"
         L"<div id=\"yc-tweaks\"></div>"
-        L"<div class=\"yc-sectitle\" style=\"margin-top:10px\">Свой CSS</div>"
-        L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\"></textarea>"
+        L"<div class=\"yc-cc\"><div class=\"yc-cc-title\">Свой CSS</div>"
+        L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\" placeholder=\".selector{ ... }\"></textarea></div>"
         L"</div>';"
         L"document.body.appendChild(ROOT);"
         L"document.getElementById('yc-close').onclick=function(){ROOT.classList.remove('open');};"
@@ -903,23 +973,30 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"document.getElementById('yc-dislike').onclick=function(){window.__ymhubQ.push('dislike');};"
         L"var twWrap=document.getElementById('yc-tweaks');"
         L"window.__ymhubTwLabels.forEach(function(label,i){"
-        L"var row=document.createElement('label');row.className='yc-tw-row';"
-        L"var cb=document.createElement('input');cb.type='checkbox';cb.id='yc-tw-'+i;"
-        L"cb.onchange=function(){window.__ymhubQ.push('tweak:'+i);};"
-        L"var sp=document.createElement('span');sp.textContent=label;"
-        L"row.appendChild(cb);row.appendChild(sp);twWrap.appendChild(row);});"
+        L"var row=document.createElement('div');row.className='yc-tw-row';"
+        L"var nm=document.createElement('div');nm.className='yc-tw-name';nm.textContent=label;"
+        L"var sw=document.createElement('div');sw.className='yc-tw-switch';sw.id='yc-tw-'+i;"
+        L"var knob=document.createElement('div');knob.className='yc-knob';sw.appendChild(knob);"
+        L"sw.onclick=function(){sw.classList.toggle('on');window.__ymhubQ.push('tweak:'+i);};"
+        L"row.appendChild(nm);row.appendChild(sw);twWrap.appendChild(row);});"
         L"document.getElementById('yc-css').addEventListener('change',function(){"
         L"window.__ymhubQ.push('css:'+this.value);});"
         L"window.__ymhubQ=window.__ymhubQ||[];"
-        L"var armed=false;"
-        L"document.addEventListener('keydown',function(e){"
+        // Named, window-stored handlers (not anonymous inline closures)
+        // so CdpRemoveMenu can actually remove them when the feature is
+        // switched off instead of leaving a stray document-wide hook.
+        L"window.__ymhubShiftArmed=false;"
+        L"window.__ymhubShiftDown=function(e){"
         L"if(e.key==='Escape'){ROOT.classList.remove('open');return;}"
-        L"if(e.key==='Shift'){if(!armed)armed=true;}else{armed=false;}},true);"
-        L"document.addEventListener('keyup',function(e){"
+        L"if(e.key==='Shift'){if(!window.__ymhubShiftArmed)window.__ymhubShiftArmed=true;}"
+        L"else{window.__ymhubShiftArmed=false;}};"
+        L"window.__ymhubShiftUp=function(e){"
         L"if(e.key!=='Shift')return;"
-        L"if(armed){var ae=document.activeElement,tag=ae&&ae.tagName;"
+        L"if(window.__ymhubShiftArmed){var ae=document.activeElement,tag=ae&&ae.tagName;"
         L"if(tag!=='INPUT'&&tag!=='TEXTAREA')ROOT.classList.toggle('open');}"
-        L"armed=false;},true);"
+        L"window.__ymhubShiftArmed=false;};"
+        L"document.addEventListener('keydown',window.__ymhubShiftDown,true);"
+        L"document.addEventListener('keyup',window.__ymhubShiftUp,true);"
         L"function syncPlaying(){"
         // "Моя волна" (Vibe) renders its own separate player bar
         // (VIBE_PLAYERBAR) instead of the regular PLAYERBAR_DESKTOP one —
@@ -952,15 +1029,17 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // id) — same family as SHUFFLE_BUTTON_ON/OFF and
         // REPEAT_BUTTON_NO_REPEAT, so presence/absence of PAUSE_BUTTON is
         // the state signal, not any attribute on PLAY_BUTTON.
-        L"document.getElementById('yc-play').textContent=q('PAUSE_BUTTON')?'\\u23F8':'\\u25B6';"
+        L"var playing=!!q('PAUSE_BUTTON');"
+        L"document.getElementById('yc-i-play').style.display=playing?'none':'';"
+        L"document.getElementById('yc-i-pause').style.display=playing?'':'none';"
         L"}"
         L"window.__ymhubSyncPlaying=syncPlaying;"
         L"setInterval(syncPlaying,700);syncPlaying();"
         L"}"
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
-        L"for(var i=0;i<9;i++){var cb=document.getElementById('yc-tw-'+i);"
-        L"if(cb)cb.checked=!!(window.__ymhubMask&(1<<i));}"
+        L"for(var i=0;i<9;i++){var sw=document.getElementById('yc-tw-'+i);"
+        L"if(sw)sw.classList.toggle('on',!!(window.__ymhubMask&(1<<i)));}"
         L"})()";
     std::string preamble =
         "window.__ymhubTwLabels=[";
@@ -1084,10 +1163,17 @@ static void CdpQueueDrain() {
 }
 
 static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
+    bool wasEnabled = false;
     while (g_run) {
         if (g_ipc && CdpEnsureConnected()) {
-            CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
-            CdpQueueDrain();
+            bool enabled = g_ipc->cheatMenuEnabled != 0;
+            if (enabled) {
+                CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
+                CdpQueueDrain();
+            } else if (wasEnabled) {
+                CdpRemoveMenu(); // just turned off — tear down what's there
+            }
+            wasEnabled = enabled;
         }
         Sleep(300);
     }

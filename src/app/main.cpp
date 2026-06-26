@@ -192,18 +192,30 @@ static std::wstring g_customName;
 // Arbitrary user CSS from the "Свой CSS" box — appended to the built-in
 // tweak rules so the user isn't limited to the canned toggle list.
 static std::wstring g_customCss;
+// Opt-in switch for the in-page cheat menu ("Меню в Яндекс Музыке" on the
+// Плагины tab) — a separate feature from the Твики/Свой CSS settings
+// above, but pushed to the DLL alongside them since CheatMenuThreadFn
+// already polls g_ipc on the same tick as the tweaks it builds the menu
+// around.
+static bool g_cheatMenuEnabled=false;
 static void LoadTweaks(){
     g_tweaksMask=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",0);
     g_customName=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomName");
-    g_customCss=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomCss");}
+    g_customCss=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"CustomCss");
+    g_cheatMenuEnabled=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"CheatMenu",0)!=0;}
 static void PushTweaksToIPC(){
     if(!g_ipc)return;
     g_ipc->tweaksMask=g_tweaksMask;
     wcsncpy_s(g_ipc->customName,g_customName.c_str(),_TRUNCATE);
     wcsncpy_s(g_ipc->customCss,g_customCss.c_str(),_TRUNCATE);
+    g_ipc->cheatMenuEnabled=g_cheatMenuEnabled?1:0;
     InterlockedIncrement(&g_ipc->tweaksSeq);}
 static void SaveTweaks(){
     RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Tweaks",g_tweaksMask);
+    PushTweaksToIPC();}
+static void SaveCheatMenuSetting(bool on){
+    g_cheatMenuEnabled=on;
+    RegSetDW(HKEY_CURRENT_USER,REG_APP,L"CheatMenu",on?1:0);
     PushTweaksToIPC();}
 static void SaveCustomName(const std::wstring& s){
     g_customName=s;
@@ -545,6 +557,7 @@ static void BroadcastState(){
         L",\"pos\":"+std::to_wstring((int)g_pos)+
         L",\"drpcEnabled\":"+(g_discordEnabled?L"true":L"false")+
         L",\"drpcConnected\":"+(g_discordPipe?L"true":L"false")+
+        L",\"cheatMenuEnabled\":"+(g_cheatMenuEnabled?L"true":L"false")+
         L",\"ver\":\"" YMHUB_VERSION_W L"\""
         L"}";
     if(g_wv)    g_wv->PostWebMessageAsString(msg.c_str());
@@ -1710,6 +1723,21 @@ html,body{width:100%;height:100%;overflow:hidden;
           <button class='pc-btn' id='drpc-btn' onclick='send("drpc-toggle")'>Включить</button>
         </div>
       </div>
+
+      <div class='plugin-card'>
+        <div class='pc-head'>
+          <div class='pc-icon blue'>⚡</div>
+          <div>
+            <div class='pc-name'>Меню в Яндекс Музыке</div>
+            <div class='pc-desc'>Весь YMHub прямо внутри окна ЯМ — открывается по Shift, без отдельного окна хаба (бета)</div>
+          </div>
+        </div>
+        <div class='pc-row'>
+          <div class='sdot' id='cheat-dot'></div>
+          <div class='stxt' id='cheat-txt'>Выключено</div>
+          <button class='pc-btn' id='cheat-btn' onclick='send("cheatmenu-toggle")'>Включить</button>
+        </div>
+      </div>
     </div>
 
     <!-- ── Tweaks tab ── -->
@@ -1869,6 +1897,12 @@ function updateState(d) {
   $('drpc-dot').classList.toggle('err',drpcOn&&!drpcConn);
   $('drpc-txt').textContent=!drpcOn?'Выключено':(drpcConn?'Подключено':'Discord не найден');
   $('drpc-btn').textContent=drpcOn?'Выключить':'Включить';
+
+  // In-page cheat menu state
+  const cheatOn=!!d.cheatMenuEnabled;
+  $('cheat-dot').classList.toggle('ok',cheatOn);
+  $('cheat-txt').textContent=cheatOn?'Включено — Shift внутри ЯМ':'Выключено';
+  $('cheat-btn').textContent=cheatOn?'Выключить':'Включить';
 
   // Position
   if(typeof d.pos==='number'){
@@ -2139,6 +2173,7 @@ static void HandleUiMessage(const std::wstring& msg){
     else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
     else if(msg==L"confirm-update") std::thread([](){InstallPendingUpdate();}).detach();
     else if(msg==L"drpc-toggle"){SaveDiscordSetting(!g_discordEnabled);BroadcastState();}
+    else if(msg==L"cheatmenu-toggle"){SaveCheatMenuSetting(!g_cheatMenuEnabled);BroadcastState();}
     else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
     else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
     else if(msg.rfind(L"pos:",0)==0){
