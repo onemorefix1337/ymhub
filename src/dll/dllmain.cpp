@@ -69,6 +69,14 @@ static HWND FindRenderWidget() {
 // YM once with --remote-debugging-port so this port is available.
 static HINTERNET g_cdpSession = nullptr, g_cdpConnect = nullptr, g_cdpWs = nullptr;
 
+// Guards every CdpSend+CdpRecv pair on the shared g_cdpWs connection.
+// Harmless while only LogBadgeThread/WorkerThread/CdpAnnounceThread (each
+// occasional, rarely truly concurrent) touched it, but the cheat-menu
+// queue-drain thread (see CdpQueueDrainThread) polls far more often, and
+// responses here aren't id-correlated — without this, one thread's recv
+// could read back a *different* thread's in-flight response.
+static std::mutex g_cdpMx;
+
 // Host writes the actual port into IPC (it may have had to pick a
 // fallback if YM_CDP_PORT was already taken by something else).
 static int CdpPort() {
@@ -247,6 +255,7 @@ static bool CdpRecv(std::string& out) {
 
 // Fire-and-forget JS eval — used for the connect-confirmation banner.
 static void CdpRunJs(const std::string& jsUtf8) {
+    std::lock_guard<std::mutex> lk(g_cdpMx);
     if (!CdpEnsureConnected()) return;
     std::string req = "{\"id\":9,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
         CdpJsonEscape(jsUtf8) + "\"}}";
@@ -446,6 +455,7 @@ static bool CdpExtractXY(const std::string& resp, double& x, double& y) {
 // this is reliably exposed (confirmed empirically: false -> true the
 // instant a like lands, same button identity as CdpClickButton above).
 static bool CdpQueryLiked() {
+    std::lock_guard<std::mutex> lk(g_cdpMx);
     if (!CdpEnsureConnected()) return false;
     std::string label = CdpUtf8(L"Нравится");
     std::string expr =
@@ -467,6 +477,7 @@ static bool CdpQueryLiked() {
 // CDN URLs are plain ASCII, so a byte-widening narrow->wide conversion
 // (same shortcut CdpFindWsPath already uses) is lossless here.
 static std::wstring CdpQueryCoverUrl() {
+    std::lock_guard<std::mutex> lk(g_cdpMx);
     if (!CdpEnsureConnected()) return L"";
     std::string expr =
         "(function(){var el=document.querySelector(\"[class*='AlbumCover_cover__']\");"
@@ -486,6 +497,7 @@ static std::wstring CdpQueryCoverUrl() {
 }
 
 static void CdpClickButton(const wchar_t* ariaLabel) {
+    std::lock_guard<std::mutex> lk(g_cdpMx);
     if (!CdpEnsureConnected()) return;
     std::string label = CdpUtf8(ariaLabel); // plain text, no special chars to escape
     // Real JS source with real double/single quotes — escaped exactly once
@@ -524,6 +536,7 @@ static const YmDefKey kYmDefKeys[13] = {
 };
 static void CdpSendYmKey(DWORD idx) {
     if (idx >= 13) return;
+    std::lock_guard<std::mutex> lk(g_cdpMx);
     if (!CdpEnsureConnected()) return;
     const YmDefKey& d = kYmDefKeys[idx];
     char buf[384]; std::string resp;
@@ -804,6 +817,283 @@ static void ExecCmd(DWORD cmd) {
     PostMessageW(w, WM_KEYUP,   vk, 1 | (sc << 16) | 0xC0000000);
 }
 
+// ── In-page "cheat menu" overlay (beta) ──────────────────────────
+// Full YMHub UI rendered directly inside YM's own page instead of a
+// separate WebView2 window — toggled by tapping Shift alone while YM
+// has focus (a deliberate *tap*, not held: a keydown immediately
+// followed by another key's keydown before Shift's keyup is treated as
+// a real Shift+letter combo and ignored, so normal capitalized typing
+// elsewhere on the page never false-triggers it). Player controls reuse
+// ExecCmd directly (no IPC round-trip needed — this *is* the process
+// that already executes those commands); tweaks/CSS additionally relay
+// to the host via reqSeq/reqText purely so registry persistence and the
+// standalone hub window stay in sync (see HandleUiMessage in main.cpp).
+//
+// Scoped to [data-test-id='PLAYERBAR_DESKTOP'] for reading now-playing
+// state (track/artist/cover/like/play — all stable data-test-id's found
+// by inspecting the live page), since the unscoped aria-label selectors
+// CdpClickButton/CdpQueryLiked use can match a *different* track's like
+// button on list pages where several are rendered at once. Read-only
+// here, so that ambiguity (a pre-existing characteristic of those two
+// functions, not something this introduces) doesn't carry over.
+static const wchar_t* kTweakLabels[9] = {
+    L"AI-комментарии о треке", L"Анимация фона плеера", L"Плашка «Версия приложения»",
+    L"Барабан рекомендаций", L"Плашка «Моя волна обновилась»", L"Лишние разделы меню",
+    L"Плюс-бейдж в профиле", L"Крупная обложка трека", L"Скрыть имя пользователя",
+};
+
+static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
+    std::wstring js;
+    js += L"(function(){"
+        L"var ROOT=document.getElementById('ymhub-cheat');"
+        L"if(!ROOT){"
+        L"var st=document.createElement('style');st.id='ymhub-cheat-style';"
+        L"st.textContent="
+        L"'#ymhub-cheat{position:fixed;top:18px;right:18px;z-index:999998;width:300px;"
+        L"font:13px -apple-system,Segoe UI,sans-serif;opacity:0;pointer-events:none;"
+        L"transform:translateX(12px);transition:opacity .18s ease,transform .18s ease;}"
+        L"#ymhub-cheat.open{opacity:1;pointer-events:auto;transform:translateX(0);}"
+        L"#ymhub-cheat .yc-panel{max-height:calc(100vh - 36px);overflow:auto;"
+        L"background:rgba(13,13,20,.92);backdrop-filter:blur(20px);"
+        L"border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;color:#fff;}"
+        L"#ymhub-cheat .yc-head{display:flex;align-items:center;justify-content:space-between;"
+        L"font-weight:700;font-size:13.5px;margin-bottom:12px;}"
+        L"#ymhub-cheat .yc-hint{font-weight:500;font-size:11px;color:rgba(255,255,255,.45);cursor:pointer;}"
+        L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:10px;}"
+        L"#ymhub-cheat .yc-cover{width:46px;height:46px;border-radius:9px;background:rgba(255,255,255,.08);"
+        L"object-fit:cover;flex-shrink:0;}"
+        L"#ymhub-cheat .yc-meta{overflow:hidden;}"
+        L"#ymhub-cheat .yc-title{font-weight:700;font-size:12.5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
+        L"#ymhub-cheat .yc-artist{font-size:11.5px;color:rgba(255,255,255,.5);white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
+        L"#ymhub-cheat .yc-controls{display:flex;gap:6px;margin-bottom:14px;}"
+        L"#ymhub-cheat .yc-controls button{flex:1;height:30px;border:none;border-radius:8px;cursor:pointer;"
+        L"background:rgba(255,255,255,.07);color:#fff;font-size:13px;}"
+        L"#ymhub-cheat .yc-controls button.on{color:#5b8fff;background:rgba(91,143,255,.18);}"
+        L"#ymhub-cheat .yc-controls button:hover{background:rgba(255,255,255,.13);}"
+        L"#ymhub-cheat .yc-sep{height:1px;background:rgba(255,255,255,.08);margin:10px 0 12px;}"
+        L"#ymhub-cheat .yc-sectitle{font-weight:700;font-size:11.5px;color:rgba(255,255,255,.55);"
+        L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:8px;}"
+        L"#ymhub-cheat .yc-tw-row{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;cursor:pointer;}"
+        L"#ymhub-cheat .yc-tw-row input{accent-color:#5b8fff;flex-shrink:0;}"
+        L"#ymhub-cheat .yc-css{width:100%;min-height:70px;resize:vertical;margin-top:6px;"
+        L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px;"
+        L"color:#fff;font:11.5px Consolas,monospace;padding:8px;box-sizing:border-box;}';"
+        L"document.head.appendChild(st);"
+        L"ROOT=document.createElement('div');ROOT.id='ymhub-cheat';"
+        L"ROOT.innerHTML="
+        L"'<div class=\"yc-panel\">"
+        L"<div class=\"yc-head\">YMHub <span class=\"yc-hint\" id=\"yc-close\">Shift — закрыть</span></div>"
+        L"<div class=\"yc-player\"><img class=\"yc-cover\" id=\"yc-cover\"><div class=\"yc-meta\">"
+        L"<div class=\"yc-title\" id=\"yc-title\">—</div><div class=\"yc-artist\" id=\"yc-artist\"></div></div></div>"
+        L"<div class=\"yc-controls\">"
+        L"<button id=\"yc-prev\">\\u23EE</button><button id=\"yc-play\">\\u25B6</button>"
+        L"<button id=\"yc-next\">\\u23ED</button><button id=\"yc-like\">\\u2665</button>"
+        L"<button id=\"yc-dislike\">\\u2715</button></div>"
+        L"<div class=\"yc-sep\"></div><div class=\"yc-sectitle\">Твики</div>"
+        L"<div id=\"yc-tweaks\"></div>"
+        L"<div class=\"yc-sectitle\" style=\"margin-top:10px\">Свой CSS</div>"
+        L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\"></textarea>"
+        L"</div>';"
+        L"document.body.appendChild(ROOT);"
+        L"document.getElementById('yc-close').onclick=function(){ROOT.classList.remove('open');};"
+        L"document.getElementById('yc-prev').onclick=function(){window.__ymhubQ.push('prev');};"
+        L"document.getElementById('yc-play').onclick=function(){window.__ymhubQ.push('toggle');};"
+        L"document.getElementById('yc-next').onclick=function(){window.__ymhubQ.push('next');};"
+        L"document.getElementById('yc-like').onclick=function(){window.__ymhubQ.push('like');};"
+        L"document.getElementById('yc-dislike').onclick=function(){window.__ymhubQ.push('dislike');};"
+        L"var twWrap=document.getElementById('yc-tweaks');"
+        L"window.__ymhubTwLabels.forEach(function(label,i){"
+        L"var row=document.createElement('label');row.className='yc-tw-row';"
+        L"var cb=document.createElement('input');cb.type='checkbox';cb.id='yc-tw-'+i;"
+        L"cb.onchange=function(){window.__ymhubQ.push('tweak:'+i);};"
+        L"var sp=document.createElement('span');sp.textContent=label;"
+        L"row.appendChild(cb);row.appendChild(sp);twWrap.appendChild(row);});"
+        L"document.getElementById('yc-css').addEventListener('change',function(){"
+        L"window.__ymhubQ.push('css:'+this.value);});"
+        L"window.__ymhubQ=window.__ymhubQ||[];"
+        L"var armed=false;"
+        L"document.addEventListener('keydown',function(e){"
+        L"if(e.key==='Escape'){ROOT.classList.remove('open');return;}"
+        L"if(e.key==='Shift'){if(!armed)armed=true;}else{armed=false;}},true);"
+        L"document.addEventListener('keyup',function(e){"
+        L"if(e.key!=='Shift')return;"
+        L"if(armed){var ae=document.activeElement,tag=ae&&ae.tagName;"
+        L"if(tag!=='INPUT'&&tag!=='TEXTAREA')ROOT.classList.toggle('open');}"
+        L"armed=false;},true);"
+        L"function syncPlaying(){"
+        // "Моя волна" (Vibe) renders its own separate player bar
+        // (VIBE_PLAYERBAR) instead of the regular PLAYERBAR_DESKTOP one —
+        // confirmed empirically (PLAYERBAR_DESKTOP is simply absent while
+        // that page is open) — so both are tried, in the order they're
+        // actually likely to exist.
+        L"var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+        L"document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");if(!pb)return;"
+        L"function q(id){return pb.querySelector(\"[data-test-id='\"+id+\"']\");}"
+        // Both TRACK_TITLE and VIBE_PLAYERBAR_TRACK_NAME wrap a marquee
+        // pair of two duplicate text nodes for scroll-on-overflow — taking
+        // textContent on the wrapper concatenates both copies, so the
+        // first child specifically is used instead.
+        L"var t=q('TRACK_TITLE')||q('VIBE_PLAYERBAR_TRACK_NAME');"
+        // SEPARATED_ARTIST_TITLE only exists inside PLAYERBAR_DESKTOP;
+        // Vibe has no equivalent in its own player bar, only the big
+        // page heading (a hash-suffixed class, less stable, but it's the
+        // only thing showing it in that view).
+        L"var a=q('SEPARATED_ARTIST_TITLE')||document.querySelector(\"[class*='VibePage_text__']\");"
+        L"var c=q('ENTITY_COVER_IMAGE')||q('VIBE_ALBUM_COVER');"
+        L"var lk=q('LIKE_BUTTON');"
+        L"var tt=t?(t.children[0]?t.children[0].textContent:t.textContent):'';"
+        L"document.getElementById('yc-title').textContent=tt||'\\u2014';"
+        L"document.getElementById('yc-artist').textContent=a?a.textContent:'';"
+        L"var csrc=c?(c.src||(c.querySelector&&c.querySelector('img')?c.querySelector('img').src:'')):'';"
+        L"if(csrc)document.getElementById('yc-cover').src=csrc;"
+        L"document.getElementById('yc-like').classList.toggle('on',!!lk&&lk.getAttribute('aria-pressed')==='true');"
+        // Confirmed empirically: playing swaps the button's data-test-id
+        // to PAUSE_BUTTON entirely (not just its aria-label on the same
+        // id) — same family as SHUFFLE_BUTTON_ON/OFF and
+        // REPEAT_BUTTON_NO_REPEAT, so presence/absence of PAUSE_BUTTON is
+        // the state signal, not any attribute on PLAY_BUTTON.
+        L"document.getElementById('yc-play').textContent=q('PAUSE_BUTTON')?'\\u23F8':'\\u25B6';"
+        L"}"
+        L"window.__ymhubSyncPlaying=syncPlaying;"
+        L"setInterval(syncPlaying,700);syncPlaying();"
+        L"}"
+        L"var cssBox=document.getElementById('yc-css');"
+        L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
+        L"for(var i=0;i<9;i++){var cb=document.getElementById('yc-tw-'+i);"
+        L"if(cb)cb.checked=!!(window.__ymhubMask&(1<<i));}"
+        L"})()";
+    std::string preamble =
+        "window.__ymhubTwLabels=[";
+    for (int i = 0; i < 9; i++) {
+        if (i) preamble += ",";
+        preamble += "\"" + CdpJsonEscape(CdpUtf8(kTweakLabels[i])) + "\"";
+    }
+    preamble += "];window.__ymhubMask=" + std::to_string(mask) + ";"
+        "window.__ymhubCss=\"" + CdpJsonEscape(CdpUtf8(customCssW ? customCssW : L"")) + "\";";
+    CdpRunJs(preamble + CdpUtf8(js.c_str()));
+}
+
+// Decodes one JSON string literal starting at s[i] (must be '"'),
+// advancing i past the closing quote — used to pull action strings back
+// out of window.__ymhubQ (see CdpQueueDrain), where a "css:..." entry can
+// contain absolutely any text the user typed, including quotes and
+// backslashes, so a naive find('"') for the closing quote isn't safe.
+static std::string JsonDecodeStringAt(const std::string& s, size_t& i) {
+    std::string out;
+    if (i >= s.size() || s[i] != '"') return out;
+    i++;
+    while (i < s.size() && s[i] != '"') {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size()) {
+            char n = s[i + 1];
+            switch (n) {
+            case '"':  out += '"';  i += 2; break;
+            case '\\': out += '\\'; i += 2; break;
+            case '/':  out += '/';  i += 2; break;
+            case 'n':  out += '\n'; i += 2; break;
+            case 'r':  out += '\r'; i += 2; break;
+            case 't':  out += '\t'; i += 2; break;
+            case 'u':
+                if (i + 5 < s.size()) {
+                    int cp = (int)strtol(s.substr(i + 2, 4).c_str(), nullptr, 16);
+                    if (cp < 0x80) out += (char)cp;
+                    else if (cp < 0x800) {
+                        out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F));
+                    } else {
+                        out += (char)(0xE0 | (cp >> 12));
+                        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+                        out += (char)(0x80 | (cp & 0x3F));
+                    }
+                    i += 6;
+                } else i++;
+                break;
+            default: out += n; i += 2; break;
+            }
+        } else { out += c; i++; }
+    }
+    if (i < s.size()) i++;
+    return out;
+}
+
+// Dispatches one queued action from the overlay. Playback commands reuse
+// ExecCmd directly — see the block comment above CdpInjectMenu for why
+// that needs no IPC hop. Tweaks/CSS apply immediately (CdpApplyTweaks)
+// for instant visual feedback *and* relay to the host (reqSeq/reqText)
+// purely so registry persistence and the standalone hub window agree —
+// same message text HandleUiMessage already parses, just one source.
+static void DispatchCheatAction(const std::string& item) {
+    if (item == "like")    { ExecCmd(YMHC_LIKE);    return; }
+    if (item == "dislike") { ExecCmd(YMHC_DISLIKE); return; }
+    if (item == "prev")    { ExecCmd(YMHC_PREV);    return; }
+    if (item == "next")    { ExecCmd(YMHC_NEXT);    return; }
+    if (item == "toggle")  { ExecCmd(YMHC_TOGGLE);  return; }
+    if (item == "shuffle") { ExecCmd(YMHC_SHUFFLE); return; }
+    if (item == "repeat")  { ExecCmd(YMHC_REPEAT);  return; }
+    if (!g_ipc) return;
+    if (item.rfind("tweak:", 0) == 0) {
+        int idx = atoi(item.c_str() + 6);
+        if (idx < 0 || idx >= 9) return;
+        DWORD newMask = g_ipc->tweaksMask ^ (1u << idx);
+        CdpApplyTweaks(newMask, g_ipc->customCss);
+        std::wstring relay = L"toggle-tweak:" + std::to_wstring(idx);
+        wcsncpy_s(g_ipc->reqText, relay.c_str(), _TRUNCATE);
+        InterlockedIncrement(&g_ipc->reqSeq);
+        return;
+    }
+    if (item.rfind("css:", 0) == 0) {
+        std::string cssUtf8 = item.substr(4);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), nullptr, 0);
+        std::wstring cssW(wlen, 0);
+        if (wlen > 0) MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), cssW.data(), wlen);
+        CdpApplyTweaks(g_ipc->tweaksMask, cssW.c_str());
+        std::wstring relay = L"set-custom-css:" + cssW;
+        wcsncpy_s(g_ipc->reqText, relay.c_str(), _TRUNCATE);
+        InterlockedIncrement(&g_ipc->reqSeq);
+        return;
+    }
+}
+
+// Drains window.__ymhubQ (pushed by the overlay's own button/checkbox/
+// textarea handlers) every tick. id:10, distinct from every other fixed
+// request id already in use on this connection.
+static void CdpQueueDrain() {
+    std::string resp;
+    {
+        std::lock_guard<std::mutex> lk(g_cdpMx);
+        if (!CdpEnsureConnected()) return;
+        std::string req = "{\"id\":10,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":"
+            "\"(function(){var q=window.__ymhubQ||[];window.__ymhubQ=[];return JSON.stringify(q);})()\","
+            "\"returnByValue\":true}}";
+        if (!CdpSend(req)) { CdpClose(); return; }
+        if (!CdpRecv(resp)) { CdpClose(); return; }
+    }
+    auto p = resp.find("\"value\":");
+    if (p == std::string::npos) return;
+    size_t i = p + 8;
+    std::string arrJson = JsonDecodeStringAt(resp, i); // un-escape one level -> "[...]"
+    size_t j = arrJson.find('[');
+    if (j == std::string::npos) return;
+    j++;
+    while (j < arrJson.size()) {
+        while (j < arrJson.size() && (arrJson[j] == ',' || arrJson[j] == ' ')) j++;
+        if (j >= arrJson.size() || arrJson[j] == ']') break;
+        if (arrJson[j] != '"') break;
+        std::string item = JsonDecodeStringAt(arrJson, j);
+        DispatchCheatAction(item);
+    }
+}
+
+static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
+    while (g_run) {
+        if (g_ipc && CdpEnsureConnected()) {
+            CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
+            CdpQueueDrain();
+        }
+        Sleep(300);
+    }
+    return 0;
+}
+
 // ── Hotkey window ───────────────────────────────────────────────
 
 // Convert host mods (1=Ctrl,2=Shift,4=Alt) to RegisterHotKey mods
@@ -940,6 +1230,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
     CreateThread(nullptr, 0, CdpAnnounceThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LogBadgeThread, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, CheatMenuThreadFn, nullptr, 0, nullptr);
 
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;

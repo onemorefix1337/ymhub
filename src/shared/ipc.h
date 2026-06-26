@@ -88,6 +88,19 @@ struct YMHubIPC {
     // Presence as an external large_image — Discord's own backend fetches
     // it directly, so this only ever needs to be a URL, never image bytes.
     wchar_t coverUrl[512];
+
+    // DLL -> host: relay for actions originating from the in-page "cheat
+    // menu" overlay (Shift inside YM, see CdpInjectMenu in dllmain.cpp).
+    // The overlay's own buttons already act instantly through the DLL's
+    // existing CDP/ExecCmd path with no host involvement — this is only
+    // for the handful of things the host alone owns (registry persistence
+    // for tweaks/CSS, mainly) so the standalone hub window and the
+    // overlay never disagree on saved state. Mirrors command/cmdSeq above,
+    // just in the opposite direction; reqText reuses the exact same
+    // message strings the hub's own WebMessageReceived already handles
+    // (see HandleUiMessage in main.cpp) so there's only one parser.
+    volatile LONG reqSeq;
+    wchar_t       reqText[4160];
 };
 
 // Bit indices into YMHubIPC::tweaksMask — matches kTweakRules order in

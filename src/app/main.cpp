@@ -2123,6 +2123,54 @@ renderTweaks();
 </script>
 </body></html>)HUB";
 
+// Shared by the hub WebView2's WebMessageReceived and by the IPC reqText
+// relay (see OnInjectTick) so the in-page "cheat menu" overlay — which
+// has no WebView2 of its own — can reach the exact same, already-tested
+// handling as the standalone hub window, instead of a second copy.
+static void HandleUiMessage(const std::wstring& msg){
+    if(msg==L"prev")          PostMessageW(g_hwnd,WM_APP+10,0,0);
+    else if(msg==L"next")     PostMessageW(g_hwnd,WM_APP+11,0,0);
+    else if(msg==L"toggle")   PostMessageW(g_hwnd,WM_APP+12,0,0);
+    else if(msg==L"like")     PostMessageW(g_hwnd,WM_APP+13,0,0);
+    else if(msg==L"dislike")  PostMessageW(g_hwnd,WM_APP+14,0,0);
+    else if(msg==L"overlay-toggle") PostMessageW(g_hwnd,WM_APP+20,0,0);
+    else if(msg==L"inject")   PostMessageW(g_hwnd,WM_APP+32,0,0);
+    else if(msg==L"close")    PostMessageW(g_hub,WM_CLOSE,0,0);
+    else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
+    else if(msg==L"confirm-update") std::thread([](){InstallPendingUpdate();}).detach();
+    else if(msg==L"drpc-toggle"){SaveDiscordSetting(!g_discordEnabled);BroadcastState();}
+    else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
+    else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
+    else if(msg.rfind(L"pos:",0)==0){
+        int n=_wtoi(msg.c_str()+4);
+        if(n>=0&&n<=5)PostMessageW(g_hwnd,WM_APP+31,(WPARAM)n,0);}
+    else if(msg.rfind(L"rebind:",0)==0){
+        unsigned m0,v0,m1,v1,m2,v2,m3,v3,m4,v4,m5,v5;
+        if(swscanf_s(msg.c_str()+7,L"%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+            &m0,&v0,&m1,&v1,&m2,&v2,&m3,&v3,&m4,&v4,&m5,&v5)==12){
+            g_keys[0]={m0,v0};g_keys[1]={m1,v1};
+            g_keys[2]={m2,v2};g_keys[3]={m3,v3};
+            g_keys[4]={m4,v4};g_keys[5]={m5,v5};
+            SaveKeys();SendHubKeys();}}
+    else if(msg.rfind(L"ymrebind:",0)==0){
+        std::vector<DWORD> nums;
+        wchar_t* ctx=nullptr;
+        std::wstring rest=msg.substr(9);
+        wchar_t* tok=wcstok_s(rest.data(),L",",&ctx);
+        while(tok){nums.push_back((DWORD)_wtoi(tok));tok=wcstok_s(nullptr,L",",&ctx);}
+        if(nums.size()==26){
+            for(int i=0;i<13;i++)g_ymKeys[i]={nums[i*2],nums[i*2+1]};
+            SaveYmKeys();SendHubYmKeys();}}
+    else if(msg.rfind(L"toggle-tweak:",0)==0){
+        int idx=_wtoi(msg.c_str()+13);
+        if(idx>=0&&idx<9){
+            g_tweaksMask^=(1u<<idx);
+            SaveTweaks();SendHubTweaks();}}
+    else if(msg.rfind(L"set-custom-name:",0)==0){
+        SaveCustomName(msg.substr(16));}
+    else if(msg.rfind(L"set-custom-css:",0)==0){
+        SaveCustomCss(msg.substr(15));}}
+
 // ── WebView2 setup ────────────────────────────────────────
 static void SetupController(ICoreWebView2Controller* ctrl, ICoreWebView2* wv, bool isHub){
     ComPtr<ICoreWebView2Controller2> c2;
@@ -2187,48 +2235,7 @@ static void InitWebView(){
                             LPWSTR s=nullptr;a->TryGetWebMessageAsString(&s);
                             if(s){
                                 std::wstring msg(s);CoTaskMemFree(s);
-                                if(msg==L"prev")          PostMessageW(g_hwnd,WM_APP+10,0,0);
-                                else if(msg==L"next")     PostMessageW(g_hwnd,WM_APP+11,0,0);
-                                else if(msg==L"toggle")   PostMessageW(g_hwnd,WM_APP+12,0,0);
-                                else if(msg==L"like")     PostMessageW(g_hwnd,WM_APP+13,0,0);
-                                else if(msg==L"dislike")  PostMessageW(g_hwnd,WM_APP+14,0,0);
-                                else if(msg==L"overlay-toggle") PostMessageW(g_hwnd,WM_APP+20,0,0);
-                                else if(msg==L"inject")   PostMessageW(g_hwnd,WM_APP+32,0,0);
-                                else if(msg==L"close")    PostMessageW(g_hub,WM_CLOSE,0,0);
-                                else if(msg==L"check-update") std::thread([](){CheckForUpdate(true);}).detach();
-                                else if(msg==L"confirm-update") std::thread([](){InstallPendingUpdate();}).detach();
-                                else if(msg==L"drpc-toggle"){SaveDiscordSetting(!g_discordEnabled);BroadcastState();}
-                                else if(msg==L"rebind-start"){g_rebinding=true; if(g_ipc)g_ipc->rebinding=TRUE;}
-                                else if(msg==L"rebind-end")  {g_rebinding=false;if(g_ipc)g_ipc->rebinding=FALSE;}
-                                else if(msg.rfind(L"pos:",0)==0){
-                                    int n=_wtoi(msg.c_str()+4);
-                                    if(n>=0&&n<=5)PostMessageW(g_hwnd,WM_APP+31,(WPARAM)n,0);}
-                                else if(msg.rfind(L"rebind:",0)==0){
-                                    unsigned m0,v0,m1,v1,m2,v2,m3,v3,m4,v4,m5,v5;
-                                    if(swscanf_s(msg.c_str()+7,L"%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
-                                        &m0,&v0,&m1,&v1,&m2,&v2,&m3,&v3,&m4,&v4,&m5,&v5)==12){
-                                        g_keys[0]={m0,v0};g_keys[1]={m1,v1};
-                                        g_keys[2]={m2,v2};g_keys[3]={m3,v3};
-                                        g_keys[4]={m4,v4};g_keys[5]={m5,v5};
-                                        SaveKeys();SendHubKeys();}}
-                                else if(msg.rfind(L"ymrebind:",0)==0){
-                                    std::vector<DWORD> nums;
-                                    wchar_t* ctx=nullptr;
-                                    std::wstring rest=msg.substr(9);
-                                    wchar_t* tok=wcstok_s(rest.data(),L",",&ctx);
-                                    while(tok){nums.push_back((DWORD)_wtoi(tok));tok=wcstok_s(nullptr,L",",&ctx);}
-                                    if(nums.size()==26){
-                                        for(int i=0;i<13;i++)g_ymKeys[i]={nums[i*2],nums[i*2+1]};
-                                        SaveYmKeys();SendHubYmKeys();}}
-                                else if(msg.rfind(L"toggle-tweak:",0)==0){
-                                    int idx=_wtoi(msg.c_str()+13);
-                                    if(idx>=0&&idx<9){
-                                        g_tweaksMask^=(1u<<idx);
-                                        SaveTweaks();SendHubTweaks();}}
-                                else if(msg.rfind(L"set-custom-name:",0)==0){
-                                    SaveCustomName(msg.substr(16));}
-                                else if(msg.rfind(L"set-custom-css:",0)==0){
-                                    SaveCustomCss(msg.substr(15));}}
+                                HandleUiMessage(msg);}
                             return S_OK;}).Get(),nullptr);
                     RECT r;GetClientRect(g_hub,&r);ctrl->put_Bounds(r);
                     g_hubWv->add_NavigationCompleted(
@@ -2299,6 +2306,7 @@ static void CALLBACK OnTrackTick(HWND,UINT,UINT_PTR,DWORD){
 // fix only happens if YM happened to already be up on the very first
 // tick, and silently never again for the rest of the session.
 static volatile bool g_debugPortCheckRunning=false;
+static LONG g_lastReqSeq=0;
 static void CALLBACK OnInjectTick(HWND,UINT,UINT_PTR,DWORD){
     if(!g_debugPortFixDone&&!g_debugPortCheckRunning){
         g_debugPortCheckRunning=true;
@@ -2306,6 +2314,12 @@ static void CALLBACK OnInjectTick(HWND,UINT,UINT_PTR,DWORD){
     bool wasMissing=!IsDllLoaded();
     TryInject();
     if(wasMissing&&IsDllLoaded()){PushKeysToIPC();PushTweaksToIPC();}
+    // In-page cheat-menu relay (see reqSeq/reqText in ipc.h) — only the
+    // handful of host-owned things (tweak/CSS persistence) come through
+    // here; the overlay's own playback buttons never touch this path.
+    if(g_ipc&&g_ipc->reqSeq!=g_lastReqSeq){
+        g_lastReqSeq=g_ipc->reqSeq;
+        HandleUiMessage(g_ipc->reqText);}
     BroadcastState();}
 
 // ── Hub WndProc ───────────────────────────────────────────
