@@ -521,6 +521,39 @@ static void CdpClickButton(const wchar_t* ariaLabel) {
     CdpSend(buf); CdpRecv(resp);
 }
 
+// Like CdpClickButton, but scoped to the current player bar (PLAYERBAR_
+// DESKTOP or VIBE_PLAYERBAR) and addressed by data-test-id rather than
+// aria-label — used for shuffle/repeat from the cheat menu's Advanced
+// section, where the unscoped aria-label lookup risks the same list-page
+// ambiguity already documented for CdpClickButton/CdpQueryLiked. Resolves
+// to null (no-op, no click sent) if the button doesn't exist or is itself
+// disabled — YM disables SHUFFLE_BUTTON in some queue contexts, confirmed
+// live, and a disabled native button simply ignores clicks too, so this
+// just mirrors that instead of silently doing nothing for a worse reason.
+static void CdpClickScoped(const char* dataTestIdPrefix) {
+    std::lock_guard<std::mutex> lk(g_cdpMx);
+    if (!CdpEnsureConnected()) return;
+    std::string expr =
+        "(function(){var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+        "document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");if(!pb)return null;"
+        "var b=pb.querySelector(\"[data-test-id^='" + std::string(dataTestIdPrefix) + "']\");"
+        "if(!b||b.disabled)return null;var r=b.getBoundingClientRect();"
+        "return {x:r.x+r.width/2,y:r.y+r.height/2};})()";
+    std::string req1 = "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
+        CdpJsonEscape(expr) + "\",\"returnByValue\":true}}";
+    if (!CdpSend(req1)) { CdpClose(); return; }
+    std::string resp;
+    if (!CdpRecv(resp)) { CdpClose(); return; }
+    double x = 0, y = 0;
+    if (!CdpExtractXY(resp, x, y)) return;
+
+    char buf[256];
+    sprintf_s(buf, "{\"id\":2,\"method\":\"Input.dispatchMouseEvent\",\"params\":{\"type\":\"mousePressed\",\"x\":%.2f,\"y\":%.2f,\"button\":\"left\",\"clickCount\":1}}", x, y);
+    CdpSend(buf); CdpRecv(resp);
+    sprintf_s(buf, "{\"id\":3,\"method\":\"Input.dispatchMouseEvent\",\"params\":{\"type\":\"mouseReleased\",\"x\":%.2f,\"y\":%.2f,\"button\":\"left\",\"clickCount\":1}}", x, y);
+    CdpSend(buf); CdpRecv(resp);
+}
+
 // Default key for each YM_ACTION_* (see shared/ipc.h) — used to emit the
 // *original* key via CDP when the host's hook detects the user's remapped
 // key. Input.dispatchKeyEvent is trusted input as far as Chromium/Electron
@@ -854,6 +887,7 @@ static void CdpRemoveMenu() {
         "document.removeEventListener('keydown',window.__ymhubShiftDown,true);"
         "document.removeEventListener('keyup',window.__ymhubShiftUp,true);"
         "window.__ymhubShiftDown=null;window.__ymhubShiftUp=null;}"
+        "if(window.__ymhubSyncTimer){clearInterval(window.__ymhubSyncTimer);window.__ymhubSyncTimer=null;}"
         "})()";
     CdpRunJs(js);
 }
@@ -868,7 +902,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // --card/--bord/--txt/--txt2 in main.cpp's HTML_HUB) so the
         // overlay reads as the same product, not a generic dark panel.
         L"st.textContent="
-        L"'#ymhub-cheat{position:fixed;top:18px;right:18px;z-index:999998;width:300px;"
+        L"'#ymhub-cheat{position:fixed;top:18px;right:18px;z-index:999998;width:400px;"
         L"font-family:\"Segoe UI Variable Text\",\"Segoe UI\",system-ui,sans-serif;"
         L"opacity:0;pointer-events:none;transform:translateX(12px);"
         L"transition:opacity .18s ease,transform .18s ease;}"
@@ -880,6 +914,30 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-head{display:flex;align-items:center;justify-content:space-between;"
         L"font-weight:700;font-size:13.5px;margin-bottom:12px;}"
         L"#ymhub-cheat .yc-hint{font-weight:500;font-size:11px;color:rgba(255,255,255,.4);cursor:pointer;}"
+        // Left icon rail + right content pane (Neverlose-style shell) —
+        // present in both Simple and Advanced; Advanced only reveals the
+        // extra "pro" rail item, the rail itself is always there.
+        L"#ymhub-cheat .yc-body{display:flex;align-items:flex-start;}"
+        L"#ymhub-cheat .yc-rail{display:flex;flex-direction:column;align-items:center;"
+        L"width:40px;flex-shrink:0;padding-right:10px;margin-right:12px;gap:4px;"
+        L"border-right:1px solid rgba(255,255,255,.08);}"
+        L"#ymhub-cheat .yc-rail-item{width:34px;height:34px;border-radius:10px;cursor:pointer;"
+        L"display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.45);"
+        L"transition:background .15s,color .15s;}"
+        L"#ymhub-cheat .yc-rail-item:hover{background:rgba(255,255,255,.08);color:#fff;}"
+        L"#ymhub-cheat .yc-rail-item.active{background:rgba(91,143,255,.18);color:#5b8fff;}"
+        L"#ymhub-cheat .yc-rail-spacer{flex:1;min-height:8px;}"
+        L"#ymhub-cheat .yc-rail-lbl{font-size:8px;color:rgba(255,255,255,.3);"
+        L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px;}"
+        L"#ymhub-cheat .yc-rail-adv{width:26px;height:16px;border-radius:99px;flex-shrink:0;margin-bottom:6px;"
+        L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);position:relative;cursor:pointer;"
+        L"transition:background .3s ease,border-color .3s ease;}"
+        L"#ymhub-cheat .yc-rail-adv.on{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
+        L"#ymhub-cheat .yc-rail-adv .yc-knob{width:10px;height:10px;top:2px;left:2px;}"
+        L"#ymhub-cheat .yc-rail-adv.on .yc-knob{left:14px;}"
+        L"#ymhub-cheat .yc-pane{flex:1;min-width:0;}"
+        L"#ymhub-cheat .yc-sec{display:none;}"
+        L"#ymhub-cheat .yc-sec.active{display:block;}"
         L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:12px;}"
         L"#ymhub-cheat .yc-cover{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.05);"
         L"object-fit:cover;flex-shrink:0;}"
@@ -890,13 +948,14 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // .yc-cb/.yc-skip/.yc-play/.yc-like/.yc-dislike mirror the
         // mini-player overlay's own .cb/.skip/#pbtn/#btn-like/#btn-dislike
         // (same file, the HTML constant) — same shapes, same hover/active
-        // feel, just sized for this panel's 300px width.
-        L"#ymhub-cheat .yc-controls{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:14px;}"
+        // feel, just sized for this panel.
+        L"#ymhub-cheat .yc-controls{display:flex;align-items:center;gap:6px;}"
         L"#ymhub-cheat .yc-cb{border:none;cursor:pointer;border-radius:50%;flex-shrink:0;"
         L"display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.65);"
         L"background:rgba(255,255,255,.06);transition:transform .15s,background .15s,color .15s;}"
         L"#ymhub-cheat .yc-cb:hover{background:rgba(255,255,255,.13);color:#fff;transform:scale(1.07);}"
         L"#ymhub-cheat .yc-cb:active{transform:scale(.88);}"
+        L"#ymhub-cheat .yc-cb:disabled{opacity:.3;pointer-events:none;}"
         L"#ymhub-cheat .yc-skip{width:30px;height:30px;}"
         L"#ymhub-cheat .yc-play{width:38px;height:38px;"
         L"background:linear-gradient(135deg,#5b8fff,#7c6fff);color:#fff;}"
@@ -906,7 +965,8 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-like.on{background:rgba(255,60,90,.22);color:#ff4d6d;}"
         L"#ymhub-cheat .yc-dislike{width:30px;height:30px;color:rgba(255,255,255,.3);}"
         L"#ymhub-cheat .yc-dislike:hover{background:rgba(255,255,255,.12);color:rgba(255,255,255,.7);}"
-        L"#ymhub-cheat .yc-sep{height:1px;background:rgba(255,255,255,.08);margin:0 0 12px;}"
+        L"#ymhub-cheat .yc-modebtn{width:34px;height:34px;}"
+        L"#ymhub-cheat .yc-modebtn.on{background:rgba(91,143,255,.18);color:#5b8fff;}"
         L"#ymhub-cheat .yc-sectitle{font-weight:700;font-size:11px;color:rgba(255,255,255,.4);"
         L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px;}"
         // .yc-tw-row/.yc-tw-switch/.yc-knob mirror the hub's own
@@ -919,7 +979,8 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-tw-switch{position:relative;width:32px;height:19px;flex-shrink:0;border-radius:99px;"
         L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);cursor:pointer;"
         L"transition:background .35s ease,border-color .35s ease;}"
-        L"#ymhub-cheat .yc-tw-switch.on{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
+        L"#ymhub-cheat .yc-tw-switch.on,#ymhub-cheat .yc-rail-adv.on"
+        L"{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
         L"#ymhub-cheat .yc-knob{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;"
         L"background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:left .35s cubic-bezier(.34,1.56,.64,1);}"
         L"#ymhub-cheat .yc-tw-switch.on .yc-knob{left:17px;}"
@@ -931,16 +992,51 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px;"
         L"color:rgba(255,255,255,.88);font:11px Consolas,\"Cascadia Code\",monospace;"
         L"padding:8px;box-sizing:border-box;outline:none;}"
-        L"#ymhub-cheat .yc-css:focus{border-color:rgba(91,143,255,.4);}';"
+        L"#ymhub-cheat .yc-css:focus{border-color:rgba(91,143,255,.4);}"
+        // Advanced-only "YM Pro" section: seek + volume + shuffle/repeat —
+        // native range inputs restyled to match the rest of the panel.
+        L"#ymhub-cheat .yc-seekrow,#ymhub-cheat .yc-volrow{display:flex;align-items:center;gap:8px;}"
+        L"#ymhub-cheat .yc-time{font-size:10.5px;color:rgba(255,255,255,.4);flex-shrink:0;width:34px;}"
+        L"#ymhub-cheat .yc-time.end{text-align:right;}"
+        L"#ymhub-cheat input[type=range]{flex:1;-webkit-appearance:none;height:4px;border-radius:99px;"
+        L"background:rgba(255,255,255,.12);outline:none;cursor:pointer;margin:0;}"
+        L"#ymhub-cheat input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;"
+        L"width:12px;height:12px;border-radius:50%;background:#5b8fff;box-shadow:0 1px 3px rgba(0,0,0,.4);}"
+        L"#ymhub-cheat .yc-volicon{color:rgba(255,255,255,.4);flex-shrink:0;display:flex;}"
+        L"#ymhub-cheat input[type=range]:disabled{opacity:.3;cursor:default;}"
+        L"';"
         L"document.head.appendChild(st);"
         L"ROOT=document.createElement('div');ROOT.id='ymhub-cheat';"
-        // Icon paths copied verbatim from the mini-player overlay's own
-        // #btn-prev/#pbtn/#btn-next/#btn-like/#btn-dislike SVGs (same
-        // file) — real shapes instead of Unicode glyphs, which render
-        // inconsistently across fonts at small sizes.
+        // Player control icon paths copied verbatim from the mini-player
+        // overlay's own #btn-prev/#pbtn/#btn-next/#btn-like/#btn-dislike
+        // SVGs (same file) — real shapes instead of Unicode glyphs, which
+        // render inconsistently across fonts at small sizes. Rail/mode
+        // icons (note, sliders, shuffle, repeat, speaker) are plain
+        // generic outline glyphs in the same spirit, not traced from any
+        // specific icon set.
         L"ROOT.innerHTML="
         L"'<div class=\"yc-panel\">"
         L"<div class=\"yc-head\">YMHub <span class=\"yc-hint\" id=\"yc-close\">Shift — закрыть</span></div>"
+        L"<div class=\"yc-body\">"
+        L"<div class=\"yc-rail\">"
+        L"<div class=\"yc-rail-item active\" id=\"yc-rail-player\" data-sec=\"player\" title=\"Плеер\">"
+        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
+        L"<path d=\"M9 18V5l12-2v13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
+        L"<circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"18\" cy=\"16\" r=\"3\"/></svg></div>"
+        L"<div class=\"yc-rail-item\" id=\"yc-rail-tweaks\" data-sec=\"tweaks\" title=\"Твики\">"
+        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\">"
+        L"<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/>"
+        L"<line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/>"
+        L"<line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/>"
+        L"<circle cx=\"4\" cy=\"12\" r=\"2\" fill=\"currentColor\"/><circle cx=\"12\" cy=\"10\" r=\"2\" fill=\"currentColor\"/>"
+        L"<circle cx=\"20\" cy=\"14\" r=\"2\" fill=\"currentColor\"/></svg></div>"
+        L"<div class=\"yc-rail-item\" id=\"yc-rail-pro\" data-sec=\"pro\" title=\"YM Pro\" style=\"display:none\">⚡</div>"
+        L"<div class=\"yc-rail-spacer\"></div>"
+        L"<div class=\"yc-rail-lbl\">ADV</div>"
+        L"<div class=\"yc-rail-adv\" id=\"yc-adv-toggle\" title=\"Расширенный режим\"><div class=\"yc-knob\"></div></div>"
+        L"</div>"
+        L"<div class=\"yc-pane\">"
+        L"<div class=\"yc-sec active\" data-sec=\"player\">"
         L"<div class=\"yc-player\"><img class=\"yc-cover\" id=\"yc-cover\"><div class=\"yc-meta\">"
         L"<div class=\"yc-title\" id=\"yc-title\">—</div><div class=\"yc-artist\" id=\"yc-artist\"></div></div></div>"
         L"<div class=\"yc-controls\">"
@@ -958,12 +1054,34 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"<button class=\"yc-cb yc-dislike\" id=\"yc-dislike\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
         L"<path d=\"M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 "
         L".41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z\"/></svg></button>"
-        L"</div>"
-        L"<div class=\"yc-sep\"></div><div class=\"yc-sectitle\">Твики</div>"
+        L"</div></div>"
+        L"<div class=\"yc-sec\" data-sec=\"tweaks\"><div class=\"yc-sectitle\">Твики</div>"
         L"<div id=\"yc-tweaks\"></div>"
         L"<div class=\"yc-cc\"><div class=\"yc-cc-title\">Свой CSS</div>"
         L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\" placeholder=\".selector{ ... }\"></textarea></div>"
-        L"</div>';"
+        L"</div>"
+        L"<div class=\"yc-sec\" data-sec=\"pro\">"
+        L"<div class=\"yc-sectitle\">Перемотка</div>"
+        L"<div class=\"yc-seekrow\"><span class=\"yc-time\" id=\"yc-t-start\">0:00</span>"
+        L"<input type=\"range\" id=\"yc-seek\" min=\"0\" max=\"100\" value=\"0\">"
+        L"<span class=\"yc-time end\" id=\"yc-t-end\">0:00</span></div>"
+        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Громкость</div>"
+        L"<div class=\"yc-volrow\"><span class=\"yc-volicon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
+        L"<path d=\"M3 9v6h4l5 5V4L7 9H3z\"/></svg></span>"
+        L"<input type=\"range\" id=\"yc-vol\" min=\"0\" max=\"1\" step=\"0.01\" value=\"0.5\"></div>"
+        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Режимы</div>"
+        L"<div class=\"yc-controls\">"
+        L"<button class=\"yc-cb yc-modebtn\" id=\"yc-shuffle\" title=\"Случайный порядок\">"
+        L"<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+        L"<polyline points=\"16 3 21 3 21 8\"/><line x1=\"4\" y1=\"20\" x2=\"21\" y2=\"3\"/>"
+        L"<polyline points=\"21 16 21 21 16 21\"/><line x1=\"15\" y1=\"15\" x2=\"21\" y2=\"21\"/>"
+        L"<line x1=\"4\" y1=\"4\" x2=\"9\" y2=\"9\"/></svg></button>"
+        L"<button class=\"yc-cb yc-modebtn\" id=\"yc-repeat\" title=\"Повтор трека\">"
+        L"<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+        L"<polyline points=\"17 1 21 5 17 9\"/><path d=\"M3 11V9a4 4 0 0 1 4-4h14\"/>"
+        L"<polyline points=\"7 23 3 19 7 15\"/><path d=\"M21 13v2a4 4 0 0 1-4 4H3\"/></svg></button>"
+        L"</div></div>"
+        L"</div></div></div>';"
         L"document.body.appendChild(ROOT);"
         L"document.getElementById('yc-close').onclick=function(){ROOT.classList.remove('open');};"
         L"document.getElementById('yc-prev').onclick=function(){window.__ymhubQ.push('prev');};"
@@ -971,6 +1089,29 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"document.getElementById('yc-next').onclick=function(){window.__ymhubQ.push('next');};"
         L"document.getElementById('yc-like').onclick=function(){window.__ymhubQ.push('like');};"
         L"document.getElementById('yc-dislike').onclick=function(){window.__ymhubQ.push('dislike');};"
+        // Rail navigation — switches the active section; the rail itself
+        // (and the Плеер/Твики items) is always present in both Simple and
+        // Advanced, only the "pro" item's visibility depends on the toggle.
+        L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-rail-item'),function(item){"
+        L"item.onclick=function(){"
+        L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-rail-item'),function(i){i.classList.remove('active');});"
+        L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-sec'),function(s){s.classList.remove('active');});"
+        L"item.classList.add('active');"
+        L"document.querySelector('#ymhub-cheat .yc-sec[data-sec=\"'+item.dataset.sec+'\"]').classList.add('active');};});"
+        // Advanced mode is a pure page-local display preference (which
+        // rail items are visible) — persisted in this page's own
+        // localStorage, never round-tripped through the DLL/host at all.
+        L"var advBtn=document.getElementById('yc-adv-toggle');"
+        L"var railPro=document.getElementById('yc-rail-pro');"
+        L"function applyAdvanced(on){advBtn.classList.toggle('on',on);railPro.style.display=on?'':'none';"
+        L"if(!on&&railPro.classList.contains('active'))document.getElementById('yc-rail-player').click();}"
+        L"applyAdvanced(localStorage.getItem('ymhubAdvanced')==='1');"
+        L"advBtn.onclick=function(){var on=!advBtn.classList.contains('on');"
+        L"localStorage.setItem('ymhubAdvanced',on?'1':'0');applyAdvanced(on);};"
+        L"document.getElementById('yc-seek').addEventListener('input',function(){window.__ymhubQ.push('seek:'+this.value);});"
+        L"document.getElementById('yc-vol').addEventListener('input',function(){window.__ymhubQ.push('vol:'+this.value);});"
+        L"document.getElementById('yc-shuffle').onclick=function(){window.__ymhubQ.push('shuffle');};"
+        L"document.getElementById('yc-repeat').onclick=function(){window.__ymhubQ.push('repeat');};"
         L"var twWrap=document.getElementById('yc-tweaks');"
         L"window.__ymhubTwLabels.forEach(function(label,i){"
         L"var row=document.createElement('div');row.className='yc-tw-row';"
@@ -997,15 +1138,20 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"window.__ymhubShiftArmed=false;};"
         L"document.addEventListener('keydown',window.__ymhubShiftDown,true);"
         L"document.addEventListener('keyup',window.__ymhubShiftUp,true);"
+        // Shared by syncPlaying and syncPro (each calls getPb() fresh, not
+        // once at build time — the element identity changes when the page
+        // navigates between "Моя волна" and everywhere else).
+        L"function getPb(){return document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+        L"document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");}"
+        L"function qIn(pb,id){return pb.querySelector(\"[data-test-id='\"+id+\"']\");}"
         L"function syncPlaying(){"
         // "Моя волна" (Vibe) renders its own separate player bar
         // (VIBE_PLAYERBAR) instead of the regular PLAYERBAR_DESKTOP one —
         // confirmed empirically (PLAYERBAR_DESKTOP is simply absent while
         // that page is open) — so both are tried, in the order they're
         // actually likely to exist.
-        L"var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
-        L"document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");if(!pb)return;"
-        L"function q(id){return pb.querySelector(\"[data-test-id='\"+id+\"']\");}"
+        L"var pb=getPb();if(!pb)return;"
+        L"function q(id){return qIn(pb,id);}"
         // Both TRACK_TITLE and VIBE_PLAYERBAR_TRACK_NAME wrap a marquee
         // pair of two duplicate text nodes for scroll-on-overflow — taking
         // textContent on the wrapper concatenates both copies, so the
@@ -1033,8 +1179,55 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"document.getElementById('yc-i-play').style.display=playing?'none':'';"
         L"document.getElementById('yc-i-pause').style.display=playing?'':'none';"
         L"}"
+        // Advanced "YM Pro" sync — seek/volume mirror the real sliders
+        // (skipped while the user has OUR slider focused, so polling
+        // doesn't fight an in-progress drag); shuffle reads .disabled too
+        // since YM itself disables that button in some queue contexts
+        // (confirmed empirically — clicks on a disabled SHUFFLE_BUTTON are
+        // simply no-ops, nothing wrong with the click mechanism itself).
+        // Repeat here is a plain two-state toggle (NO_REPEAT/REPEAT_ONE) —
+        // unlike some other players YM has no separate "repeat all".
+        L"function syncPro(){"
+        L"var pb=getPb();if(!pb)return;"
+        L"function q(id){return qIn(pb,id);}"
+        // On "Моя волна" the timecode element is a plain DIV (a passive
+        // progress bar, no fixed queue to seek within) rather than the
+        // real range input the rest of the app uses — confirmed live.
+        // Mirror it as a disabled slider instead of trying to drive a
+        // value-set against an element that has no .value at all.
+        L"var seekEl=q('TIMECODE_SLIDER')||q('VIBE_PLAYERBAR_TIMECODE_SLIDER');"
+        L"var mySeek=document.getElementById('yc-seek');"
+        L"var seekable=!!seekEl&&seekEl.tagName==='INPUT';"
+        L"mySeek.disabled=!seekable;"
+        L"if(seekable&&document.activeElement!==mySeek){"
+        L"mySeek.max=seekEl.getAttribute('max')||100;mySeek.value=seekEl.value;"
+        L"var ts=q('TIMECODE_TIME_START'),te=q('TIMECODE_TIME_END');"
+        L"document.getElementById('yc-t-start').textContent=ts?ts.textContent:'0:00';"
+        L"document.getElementById('yc-t-end').textContent=te?te.textContent:'0:00';"
+        L"}else if(!seekable){"
+        L"var vtc=q('VIBE_PLAYERBAR_TIMECODE'),parts=vtc?vtc.textContent.split('/'):null;"
+        L"document.getElementById('yc-t-start').textContent=parts?parts[0].trim():'0:00';"
+        L"document.getElementById('yc-t-end').textContent=parts?parts[1].trim():'0:00';"
+        L"}"
+        L"var volEl=q('CHANGE_VOLUME_SLIDER');var myVol=document.getElementById('yc-vol');"
+        L"if(volEl&&document.activeElement!==myVol)myVol.value=volEl.value;"
+        // Confirmed live: like PLAY_BUTTON/PAUSE_BUTTON, the id itself
+        // swaps to SHUFFLE_BUTTON_ON when active (plain SHUFFLE_BUTTON
+        // otherwise) — an exact-match lookup only ever sees the off state.
+        L"var shuf=pb.querySelector(\"[data-test-id^='SHUFFLE_BUTTON']\");var shufBtn=document.getElementById('yc-shuffle');"
+        L"if(shuf){shufBtn.disabled=shuf.disabled;"
+        L"shufBtn.classList.toggle('on',shuf.getAttribute('data-test-id')!=='SHUFFLE_BUTTON');}"
+        // Confirmed live: repeat actually has *three* states (cycles
+        // NO_REPEAT -> REPEAT_BUTTON_REPEAT_CONTEXT -> _REPEAT_ONE ->
+        // back), not just the two this was first tested against — rather
+        // than allowlist every "on" suffix, anything that isn't the bare
+        // NO_REPEAT id counts as on.
+        L"var rep=pb.querySelector(\"[data-test-id^='REPEAT_BUTTON']\");"
+        L"if(rep)document.getElementById('yc-repeat').classList.toggle('on',"
+        L"rep.getAttribute('data-test-id')!=='REPEAT_BUTTON_NO_REPEAT');"
+        L"}"
         L"window.__ymhubSyncPlaying=syncPlaying;"
-        L"setInterval(syncPlaying,700);syncPlaying();"
+        L"window.__ymhubSyncTimer=setInterval(function(){syncPlaying();syncPro();},700);syncPlaying();syncPro();"
         L"}"
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
@@ -1094,6 +1287,24 @@ static std::string JsonDecodeStringAt(const std::string& s, size_t& i) {
     return out;
 }
 
+// seek:/vol: values are spliced directly into a JS source string run via
+// CdpRunJs (see below) — they should always be a plain number straight
+// from our own <input type=range>.value, but since that text ends up
+// inside eval'd script, reject anything that isn't actually numeric
+// rather than trusting the queue contents.
+static bool IsPlainNumber(const std::string& s) {
+    if (s.empty()) return false;
+    bool seenDigit = false, seenDot = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c == '-' && i == 0) continue;
+        if (c == '.' && !seenDot) { seenDot = true; continue; }
+        if (c < '0' || c > '9') return false;
+        seenDigit = true;
+    }
+    return seenDigit;
+}
+
 // Dispatches one queued action from the overlay. Playback commands reuse
 // ExecCmd directly — see the block comment above CdpInjectMenu for why
 // that needs no IPC hop. Tweaks/CSS apply immediately (CdpApplyTweaks)
@@ -1106,8 +1317,52 @@ static void DispatchCheatAction(const std::string& item) {
     if (item == "prev")    { ExecCmd(YMHC_PREV);    return; }
     if (item == "next")    { ExecCmd(YMHC_NEXT);    return; }
     if (item == "toggle")  { ExecCmd(YMHC_TOGGLE);  return; }
-    if (item == "shuffle") { ExecCmd(YMHC_SHUFFLE); return; }
-    if (item == "repeat")  { ExecCmd(YMHC_REPEAT);  return; }
+    // Scoped coordinate-click (CdpClickScoped), not ExecCmd's YMHC_SHUFFLE/
+    // YMHC_REPEAT key-send — that path only works while the page's
+    // *focused element* isn't a text input (e.g. the search box), which
+    // the OS-focus check alone (already guaranteed here) doesn't cover.
+    if (item == "shuffle") { CdpClickScoped("SHUFFLE_BUTTON"); return; }
+    if (item == "repeat")  { CdpClickScoped("REPEAT_BUTTON");  return; }
+    // Seek/volume: real native range inputs, confirmed live — set via the
+    // standard React-controlled-input trick (native value setter + a real
+    // 'input'/'change' event) rather than a coordinate drag simulation,
+    // since the value already comes from OUR OWN slider (always a plain
+    // number, never arbitrary user text like the css: case below).
+    if (item.rfind("seek:", 0) == 0) {
+        std::string val = item.substr(5);
+        if (!IsPlainNumber(val)) return;
+        std::string js =
+            "(function(){var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+            "document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");if(!pb)return;"
+            "var el=pb.querySelector(\"[data-test-id='TIMECODE_SLIDER']\")||"
+            "pb.querySelector(\"[data-test-id='VIBE_PLAYERBAR_TIMECODE_SLIDER']\");"
+            // On "Моя волна" this resolves to a plain DIV (no fixed queue
+            // to seek within) rather than the real range input the rest
+            // of the app uses for this — confirmed live. The panel itself
+            // already disables its seek slider in that case (see
+            // syncPro), this is the matching guard on the write side.
+            "if(!el||el.tagName!=='INPUT')return;"
+            "var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
+            "d.set.call(el,'" + val + "');"
+            "el.dispatchEvent(new Event('input',{bubbles:true}));"
+            "el.dispatchEvent(new Event('change',{bubbles:true}));})()";
+        CdpRunJs(js);
+        return;
+    }
+    if (item.rfind("vol:", 0) == 0) {
+        std::string val = item.substr(4);
+        if (!IsPlainNumber(val)) return;
+        std::string js =
+            "(function(){var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+            "document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");if(!pb)return;"
+            "var el=pb.querySelector(\"[data-test-id='CHANGE_VOLUME_SLIDER']\");if(!el)return;"
+            "var d=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');"
+            "d.set.call(el,'" + val + "');"
+            "el.dispatchEvent(new Event('input',{bubbles:true}));"
+            "el.dispatchEvent(new Event('change',{bubbles:true}));})()";
+        CdpRunJs(js);
+        return;
+    }
     if (!g_ipc) return;
     if (item.rfind("tweak:", 0) == 0) {
         int idx = atoi(item.c_str() + 6);
