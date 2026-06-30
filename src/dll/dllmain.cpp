@@ -902,11 +902,11 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // --card/--bord/--txt/--txt2 in main.cpp's HTML_HUB) so the
         // overlay reads as the same product, not a generic dark panel.
         L"st.textContent="
-        L"'#ymhub-cheat{position:fixed;top:18px;right:18px;z-index:999998;width:400px;"
+        L"'#ymhub-cheat{position:fixed;top:50%;left:50%;z-index:999998;width:400px;"
         L"font-family:\"Segoe UI Variable Text\",\"Segoe UI\",system-ui,sans-serif;"
-        L"opacity:0;pointer-events:none;transform:translateX(12px);"
-        L"transition:opacity .18s ease,transform .18s ease;}"
-        L"#ymhub-cheat.open{opacity:1;pointer-events:auto;transform:translateX(0);}"
+        L"opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.96);"
+        L"transition:opacity .15s ease,transform .15s ease;}"
+        L"#ymhub-cheat.open{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1);}"
         L"#ymhub-cheat .yc-panel{max-height:calc(100vh - 36px);overflow:auto;"
         L"background:#0d0d14;backdrop-filter:blur(20px);"
         L"border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;"
@@ -1126,13 +1126,18 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // Named, window-stored handlers (not anonymous inline closures)
         // so CdpRemoveMenu can actually remove them when the feature is
         // switched off instead of leaving a stray document-wide hook.
+        // location===2 is the right Shift key specifically (1 is left,
+        // KeyboardEvent never reports 0/"standard" for Shift) — only the
+        // right one opens the menu, confirmed live that left Shift was
+        // triggering it too and that's not wanted (collides with normal
+        // left-Shift use elsewhere).
         L"window.__ymhubShiftArmed=false;"
         L"window.__ymhubShiftDown=function(e){"
         L"if(e.key==='Escape'){ROOT.classList.remove('open');return;}"
-        L"if(e.key==='Shift'){if(!window.__ymhubShiftArmed)window.__ymhubShiftArmed=true;}"
+        L"if(e.key==='Shift'){if(e.location===2&&!window.__ymhubShiftArmed)window.__ymhubShiftArmed=true;}"
         L"else{window.__ymhubShiftArmed=false;}};"
         L"window.__ymhubShiftUp=function(e){"
-        L"if(e.key!=='Shift')return;"
+        L"if(e.key!=='Shift'||e.location!==2)return;"
         L"if(window.__ymhubShiftArmed){var ae=document.activeElement,tag=ae&&ae.tagName;"
         L"if(tag!=='INPUT'&&tag!=='TEXTAREA')ROOT.classList.toggle('open');}"
         L"window.__ymhubShiftArmed=false;};"
@@ -1408,12 +1413,29 @@ static void CdpQueueDrain() {
     size_t j = arrJson.find('[');
     if (j == std::string::npos) return;
     j++;
+    std::vector<std::string> items;
     while (j < arrJson.size()) {
         while (j < arrJson.size() && (arrJson[j] == ',' || arrJson[j] == ' ')) j++;
         if (j >= arrJson.size() || arrJson[j] == ']') break;
         if (arrJson[j] != '"') break;
-        std::string item = JsonDecodeStringAt(arrJson, j);
-        DispatchCheatAction(item);
+        items.push_back(JsonDecodeStringAt(arrJson, j));
+    }
+    // A drag on the seek/volume sliders pushes one entry per native
+    // 'input' event — easily a dozen+ within one drain window — and each
+    // one used to cost its own full synchronous CDP round-trip serialized
+    // on g_cdpMx, so real playback visibly lagged behind the thumb during
+    // a drag. Only the final value of each ever matters, so keep just the
+    // last 'seek:'/'vol:' entry and drop the rest; every other action
+    // (clicks, tweaks, css) still dispatches in order, unthrottled.
+    int lastSeek = -1, lastVol = -1;
+    for (int k = 0; k < (int)items.size(); k++) {
+        if (items[k].rfind("seek:", 0) == 0) lastSeek = k;
+        else if (items[k].rfind("vol:", 0) == 0) lastVol = k;
+    }
+    for (int k = 0; k < (int)items.size(); k++) {
+        if ((items[k].rfind("seek:", 0) == 0 && k != lastSeek) ||
+            (items[k].rfind("vol:", 0) == 0 && k != lastVol)) continue;
+        DispatchCheatAction(items[k]);
     }
 }
 
