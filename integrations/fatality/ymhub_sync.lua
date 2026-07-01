@@ -95,7 +95,7 @@ end
 -- match HUD from here — nudge HUD_X/HUD_Y below if it still collides with
 -- something on your actual layout.
 local HUD_X, HUD_Y = 20, 120
-local CARD_W = 250
+local CARD_W = 280
 
 -- Deliberately staying off AddRectFilledRounded/AddGlow/AddWithBlur here —
 -- rounded corners would read nicer, but that was the one genuinely new,
@@ -183,7 +183,7 @@ local function draw_hud()
     local slide = (1 - e) * 14     -- px, card eases up into its resting spot
 
     local show_time = status.seekable
-    local card_h = show_time and 78 or 60
+    local card_h = show_time and 106 or 84
     local x, y = HUD_X, HUD_Y + slide
 
     d:AddRectFilled(draw.Rect(x, y, x + CARD_W, y + card_h), rgba(C_CARD_BG, CARD_ALPHA, e))
@@ -212,15 +212,22 @@ local function draw_hud()
     local full_clip = draw.Rect(0, 0, screen.x, screen.y)
 
     d:OverrideClipRect(text_clip)
+
+    -- Small caps-style label first, same role as "ЯНДЕКС МУЗЫКА" atop the
+    -- hub's own overlay — then title/artist in the hub's own order (title
+    -- first, bigger/bolder; artist smaller underneath it), not the
+    -- one-line "artist — title" this started as.
     d.font = draw.fonts['gui_main']
-    d:AddText(draw.Vec2(x + pad, y + 10), status.artist or '', rgba(C_TEXT_DIM, 255, e))
+    d:AddText(draw.Vec2(x + pad, y + 8), 'ЯНДЕКС МУЗЫКА', rgba(C_ACCENT, 255, e))
 
     d.font = draw.fonts['gui_bold'] or draw.fonts['gui_main']
-    d:AddText(draw.Vec2(x + pad, y + 26), status.title or '', rgba(C_TEXT_MAIN, 255, e))
-    d:OverrideClipRect(full_clip)
+    d:AddText(draw.Vec2(x + pad, y + 24), status.title or '', rgba(C_TEXT_MAIN, 255, e))
 
     d.font = draw.fonts['gui_main']
-    draw_status_dots(d, x + pad, y + 48, e)
+    d:AddText(draw.Vec2(x + pad, y + 42), status.artist or '', rgba(C_TEXT_DIM, 255, e))
+    d:OverrideClipRect(full_clip)
+
+    draw_status_dots(d, x + pad, y + 64, e)
 
     if show_time then
         local bar_y = y + card_h - 18
