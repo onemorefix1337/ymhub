@@ -95,31 +95,75 @@ end
 -- match HUD from here — nudge HUD_X/HUD_Y below if it still collides with
 -- something on your actual layout.
 local HUD_X, HUD_Y = 20, 120
+local CARD_W = 250
+
+local ACCENT      = draw.Color(120, 190, 255)
+local ACCENT_DIM  = draw.Color(70, 90, 110)
+local TEXT_MAIN   = draw.Color(255, 255, 255)
+local TEXT_DIM    = draw.Color(165, 165, 175)
+local TEXT_FAINT  = draw.Color(120, 120, 130)
+local CARD_BG     = draw.Color(14, 14, 18, 215)
+local BAR_BG      = draw.Color(50, 50, 58)
+
+-- One filled square per active flag instead of bracketed debug text
+-- ("[liked]") — a row of small colored dots reads at a glance instead of
+-- having to read words. Liked = accent pink, shuffle/repeat = accent blue
+-- when on, dim gray when off (dot is always drawn so the row doesn't jump
+-- around as state changes).
+local function draw_status_dots(d, x, y)
+    local dot = 6
+    local specs = {
+        { status.liked,    draw.Color(230, 90, 130) },
+        { status.shuffle,  ACCENT },
+        { status.repeatOn, ACCENT },
+    }
+    for _, s in ipairs(specs) do
+        local on, col = s[1], s[2]
+        d:AddRectFilled(draw.Rect(x, y, x + dot, y + dot), on and col or ACCENT_DIM)
+        x = x + dot + 6
+    end
+end
 
 local function draw_hud()
     if not status.ok then return end
     local d = draw.surface
-    d.font = draw.fonts['gui_main']
 
-    local line1 = (status.artist or '') .. '  —  ' .. (status.title or '')
-    local state = status.playing and 'playing' or 'paused'
-    if status.liked then state = state .. '  [liked]' end
-    if status.shuffle then state = state .. '  [shuffle]' end
-    if status.repeatOn then state = state .. '  [repeat]' end
     local show_time = status.seekable
-    local time_line = show_time and ((status.posText or '0:00') .. ' / ' .. (status.durText or '0:00')) or nil
+    local card_h = show_time and 78 or 60
+    local x, y = HUD_X, HUD_Y
 
-    -- Plain solid background (not the rounded/alpha variant — its exact
-    -- parameter units weren't confirmed in the docs and this isn't worth
-    -- guessing on) so the text is readable over whatever's behind it,
-    -- rather than floating bare over the game world like before.
-    local box_h = show_time and 66 or 46
-    d:AddRectFilled(draw.Rect(HUD_X - 10, HUD_Y - 10, HUD_X + 260, HUD_Y - 10 + box_h), draw.Color(10, 10, 14))
+    d:AddRectFilledRounded(draw.Rect(x, y, x + CARD_W, y + card_h), CARD_BG, 8)
+    -- Thin left accent bar doubles as the playing/paused indicator so the
+    -- state doesn't need its own text line.
+    d:AddRectFilled(draw.Rect(x, y, x + 3, y + card_h), status.playing and ACCENT or ACCENT_DIM)
 
-    d:AddText(draw.Vec2(HUD_X, HUD_Y), line1, draw.Color(255, 255, 255))
-    d:AddText(draw.Vec2(HUD_X, HUD_Y + 20), state, draw.Color(180, 180, 180))
+    local pad = 16
+    d.font = draw.fonts['gui_main']
+    d:AddText(draw.Vec2(x + pad, y + 10), status.artist or '', TEXT_DIM)
+
+    d.font = draw.fonts['gui_bold'] or draw.fonts['gui_main']
+    d:AddText(draw.Vec2(x + pad, y + 26), status.title or '', TEXT_MAIN)
+
+    d.font = draw.fonts['gui_main']
+    draw_status_dots(d, x + pad, y + 48)
+
     if show_time then
-        d:AddText(draw.Vec2(HUD_X, HUD_Y + 40), time_line, draw.Color(140, 140, 140))
+        local bar_y = y + card_h - 18
+        local bar_x1, bar_x2 = x + pad, x + CARD_W - pad
+        d:AddRectFilled(draw.Rect(bar_x1, bar_y, bar_x2, bar_y + 3), BAR_BG)
+        -- Plain clamp, no math.min/max — same lesson as the pcall mistake
+        -- above: never confirmed the math library exists here either, and
+        -- this is trivial to write without it.
+        local frac = 0
+        if status.seekMax and status.seekMax > 0 then
+            frac = (status.seekPos or 0) / status.seekMax
+            if frac < 0 then frac = 0 end
+            if frac > 1 then frac = 1 end
+        end
+        d:AddRectFilled(draw.Rect(bar_x1, bar_y, bar_x1 + (bar_x2 - bar_x1) * frac, bar_y + 3), ACCENT)
+        d:AddText(draw.Vec2(bar_x1, bar_y + 6), status.posText or '0:00', TEXT_FAINT)
+        local dur = status.durText or '0:00'
+        d:AddText(draw.Vec2(bar_x2 - (#dur * 6), bar_y + 6), dur, TEXT_FAINT)
     end
 end
 
