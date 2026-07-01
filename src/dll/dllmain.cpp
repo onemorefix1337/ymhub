@@ -2,6 +2,8 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <winhttp.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -10,8 +12,13 @@
 #include "../shared/ipc.h"
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 #define YM_CDP_PORT 9876
+
+// Loopback-only bridge port for external tools (e.g. a game overlay script)
+// to read now-playing state / issue playback actions — see HttpBridgeThreadFn.
+#define YMHUB_BRIDGE_PORT 47990
 
 static HANDLE        g_hMem       = nullptr;
 static YMHubIPC*     g_ipc        = nullptr;
@@ -1439,6 +1446,162 @@ static void CdpQueueDrain() {
     }
 }
 
+// Only playback actions cross the network bridge — tweak:/css: stay
+// reachable solely through the hub's own UI (registry-backed, host-
+// authoritative), never from an external process.
+static bool IsBridgeAllowedAction(const std::string& item) {
+    static const char* kExact[] = { "like", "dislike", "prev", "next", "toggle", "shuffle", "repeat" };
+    for (const char* e : kExact) if (item == e) return true;
+    if (item.rfind("seek:", 0) == 0) return true;
+    if (item.rfind("vol:", 0) == 0) return true;
+    return false;
+}
+
+static void HttpSendResponse(SOCKET s, int code, const char* status, const std::string& body) {
+    char head[256];
+    sprintf_s(head, "HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        code, status, body.size());
+    send(s, head, (int)strlen(head), 0);
+    if (!body.empty()) send(s, body.data(), (int)body.size(), 0);
+}
+
+// Independent of the in-page cheat menu (works whether or not that's even
+// enabled) — same selectors syncPlaying/syncPro already established, just
+// queried fresh and packed into one JSON object via the page's own
+// JSON.stringify rather than reading several separate DOM properties back.
+static std::string CdpQueryStatusJson() {
+    std::string js =
+        "(function(){"
+        "var pb=document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
+        "document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");"
+        "if(!pb)return JSON.stringify({ok:false});"
+        "function q(id){return pb.querySelector(\"[data-test-id='\"+id+\"']\");}"
+        "var t=q('TRACK_TITLE')||q('VIBE_PLAYERBAR_TRACK_NAME');"
+        "var a=q('SEPARATED_ARTIST_TITLE')||document.querySelector(\"[class*='VibePage_text__']\");"
+        "var lk=q('LIKE_BUTTON');"
+        "var shuf=pb.querySelector(\"[data-test-id^='SHUFFLE_BUTTON']\");"
+        "var rep=pb.querySelector(\"[data-test-id^='REPEAT_BUTTON']\");"
+        "var seekEl=q('TIMECODE_SLIDER')||q('VIBE_PLAYERBAR_TIMECODE_SLIDER');"
+        "var volEl=q('CHANGE_VOLUME_SLIDER');"
+        "var seekable=!!seekEl&&seekEl.tagName==='INPUT';"
+        // Time is sent as already-formatted text (same TIMECODE_TIME_START/
+        // END nodes the panel itself mirrors), not raw slider value/max —
+        // that pair's actual unit was never confirmed to be seconds, so a
+        // consumer re-deriving mm:ss from it would be guessing.
+        "var posText='0:00',durText='0:00';"
+        "if(seekable){var ts=q('TIMECODE_TIME_START'),te=q('TIMECODE_TIME_END');"
+        "posText=ts?ts.textContent:posText;durText=te?te.textContent:durText;"
+        "}else{var vtc=q('VIBE_PLAYERBAR_TIMECODE'),parts=vtc?vtc.textContent.split('/'):null;"
+        "if(parts){posText=parts[0].trim();durText=parts[1].trim();}}"
+        "return JSON.stringify({ok:true,"
+        "title:t?(t.children[0]?t.children[0].textContent:t.textContent):'',"
+        "artist:a?a.textContent:'',"
+        "liked:!!lk&&lk.getAttribute('aria-pressed')==='true',"
+        "playing:!!q('PAUSE_BUTTON'),"
+        "shuffle:!!shuf&&shuf.getAttribute('data-test-id')!=='SHUFFLE_BUTTON',"
+        "repeatOn:!!rep&&rep.getAttribute('data-test-id')!=='REPEAT_BUTTON_NO_REPEAT',"
+        "seekable:seekable,posText:posText,durText:durText,"
+        "seekPos:seekable?Number(seekEl.value):0,"
+        "seekMax:seekable?Number(seekEl.getAttribute('max')||100):0,"
+        "volume:volEl?Number(volEl.value):0});"
+        "})()";
+    std::lock_guard<std::mutex> lk(g_cdpMx);
+    if (!CdpEnsureConnected()) return "{\"ok\":false}";
+    std::string req = "{\"id\":11,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
+        CdpJsonEscape(js) + "\",\"returnByValue\":true}}";
+    if (!CdpSend(req)) { CdpClose(); return "{\"ok\":false}"; }
+    std::string resp;
+    if (!CdpRecv(resp)) { CdpClose(); return "{\"ok\":false}"; }
+    auto p = resp.find("\"value\":");
+    if (p == std::string::npos) return "{\"ok\":false}";
+    size_t i = p + 8;
+    return JsonDecodeStringAt(resp, i);
+}
+
+// Loopback-only JSON bridge so an external process (a Lua script running
+// inside a separate game, in this project's case) can read now-playing
+// state and issue the same playback actions the in-page cheat menu already
+// can — GET /status, POST /cmd with a raw action string body (the exact
+// vocabulary DispatchCheatAction/window.__ymhubQ already use, e.g. "next"
+// or "seek:42.5" — no JSON envelope, since both ends of this bridge are
+// ours). Bound to 127.0.0.1 specifically, never 0.0.0.0 — nothing off-box
+// can reach it, same trust boundary the CDP debug port itself already
+// relies on elsewhere in this file. One request handled at a time, same
+// "simple over clever" tradeoff as CdpQueueDrain's single eval per tick.
+static DWORD WINAPI HttpBridgeThreadFn(LPVOID) {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) { WSACleanup(); return 1; }
+
+    int reuse = 1;
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(YMHUB_BRIDGE_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR ||
+        listen(listener, 8) == SOCKET_ERROR) {
+        LogMsg("HTTP bridge: bind/listen failed, err=" + std::to_string(WSAGetLastError()));
+        closesocket(listener); WSACleanup(); return 1;
+    }
+    LogMsg("HTTP bridge listening on 127.0.0.1:" + std::to_string(YMHUB_BRIDGE_PORT));
+
+    while (g_run) {
+        SOCKET c = accept(listener, nullptr, nullptr);
+        if (c == INVALID_SOCKET) { if (!g_run) break; continue; }
+
+        DWORD tv = 3000;
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+        std::string req;
+        char buf[4096];
+        int n;
+        while (req.find("\r\n\r\n") == std::string::npos &&
+            (n = recv(c, buf, sizeof(buf), 0)) > 0) {
+            req.append(buf, n);
+        }
+        size_t headEnd = req.find("\r\n\r\n");
+        if (headEnd == std::string::npos) { closesocket(c); continue; }
+
+        bool isPost = req.rfind("POST", 0) == 0;
+        std::string path;
+        size_t sp1 = req.find(' ');
+        size_t sp2 = sp1 == std::string::npos ? std::string::npos : req.find(' ', sp1 + 1);
+        if (sp1 != std::string::npos && sp2 != std::string::npos)
+            path = req.substr(sp1 + 1, sp2 - sp1 - 1);
+
+        std::string body = req.substr(headEnd + 4);
+        if (isPost) {
+            size_t clPos = req.find("Content-Length:");
+            size_t want = clPos != std::string::npos ? (size_t)atoi(req.c_str() + clPos + 16) : 0;
+            while (body.size() < want && (n = recv(c, buf, sizeof(buf), 0)) > 0) body.append(buf, n);
+        }
+
+        if (!isPost && path == "/status") {
+            HttpSendResponse(c, 200, "OK", CdpQueryStatusJson());
+        } else if (isPost && path == "/cmd") {
+            if (IsBridgeAllowedAction(body)) {
+                DispatchCheatAction(body);
+                HttpSendResponse(c, 200, "OK", "{\"ok\":true}");
+            } else {
+                HttpSendResponse(c, 403, "Forbidden", "{\"ok\":false,\"error\":\"not allowed\"}");
+            }
+        } else {
+            HttpSendResponse(c, 404, "Not Found", "{\"ok\":false,\"error\":\"not found\"}");
+        }
+
+        shutdown(c, SD_SEND);
+        closesocket(c);
+    }
+
+    closesocket(listener);
+    WSACleanup();
+    return 0;
+}
+
 static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
     bool wasEnabled = false;
     while (g_run) {
@@ -1594,6 +1757,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     CreateThread(nullptr, 0, CdpAnnounceThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LogBadgeThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, CheatMenuThreadFn, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, HttpBridgeThreadFn, nullptr, 0, nullptr);
 
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;
