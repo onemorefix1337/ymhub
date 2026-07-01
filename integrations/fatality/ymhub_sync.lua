@@ -108,14 +108,18 @@ local CARD_W = 250
 -- rgba() returns a fresh Color each call so alpha can be animated; base
 -- colors are kept as plain {r,g,b} tables rather than pre-built Color
 -- objects for exactly that reason.
-local C_ACCENT     = { 120, 190, 255 }
-local C_ACCENT_DIM = { 70, 90, 110 }
+-- Accent matches YMHub's own overlay palette (--ac in the in-page cheat
+-- menu's CSS, dllmain.cpp) rather than an arbitrary blue, so this reads as
+-- the same product instead of a generic HUD.
+local C_ACCENT     = { 91, 143, 255 }
+local C_ACCENT_DIM = { 60, 75, 100 }
 local C_LIKED      = { 230, 90, 130 }
 local C_TEXT_MAIN  = { 255, 255, 255 }
 local C_TEXT_DIM   = { 165, 165, 175 }
 local C_TEXT_FAINT = { 120, 120, 130 }
-local C_CARD_BG    = { 14, 14, 18 }
+local C_CARD_BG    = { 13, 13, 20 }
 local C_BAR_BG     = { 50, 50, 58 }
+local CARD_ALPHA   = 175 -- was 215 — more glass, less solid block
 
 local function rgba(c, a, mul)
     mul = mul or 1
@@ -182,7 +186,7 @@ local function draw_hud()
     local card_h = show_time and 78 or 60
     local x, y = HUD_X, HUD_Y + slide
 
-    d:AddRectFilled(draw.Rect(x, y, x + CARD_W, y + card_h), rgba(C_CARD_BG, 215, e))
+    d:AddRectFilled(draw.Rect(x, y, x + CARD_W, y + card_h), rgba(C_CARD_BG, CARD_ALPHA, e))
 
     -- Accent bar: steady when paused, gently pulsing brightness while
     -- playing — cheap "alive" feel without needing a real glow primitive.
@@ -194,11 +198,26 @@ local function draw_hud()
     d:AddRectFilled(draw.Rect(x, y, x + 3, y + card_h), rgba(bar_col, 255, e))
 
     local pad = 16
+    -- Long titles/artists (collab tracks especially) were rendering well
+    -- past the card's own edge with no truncation at all — confirmed live.
+    -- Can't slice the string itself to truncate it (that needs the
+    -- standard string library, never confirmed to exist here either — same
+    -- category of risk as pcall/math), so instead the drawing itself is
+    -- clipped to the card's inner width: the full string is still handed
+    -- to AddText, it just can't paint outside this rect. Reset back to an
+    -- unbounded clip right after, so this doesn't affect the dots/progress
+    -- bar below or anything another script draws later this same frame.
+    local text_clip = draw.Rect(x + pad, y, x + CARD_W - pad, y + card_h)
+    local screen = draw.GetDisplay()
+    local full_clip = draw.Rect(0, 0, screen.x, screen.y)
+
+    d:OverrideClipRect(text_clip)
     d.font = draw.fonts['gui_main']
     d:AddText(draw.Vec2(x + pad, y + 10), status.artist or '', rgba(C_TEXT_DIM, 255, e))
 
     d.font = draw.fonts['gui_bold'] or draw.fonts['gui_main']
     d:AddText(draw.Vec2(x + pad, y + 26), status.title or '', rgba(C_TEXT_MAIN, 255, e))
+    d:OverrideClipRect(full_clip)
 
     d.font = draw.fonts['gui_main']
     draw_status_dots(d, x + pad, y + 48, e)
