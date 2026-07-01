@@ -49,19 +49,14 @@ end
 -- on the ON edge and immediately resets itself. That also means it inherits
 -- Fatality's normal per-control hotkey binding, same as any other checkbox.
 --
--- pcall-wrapped: with 7 near-identical calls in a row, if any single one
--- ever throws (bad id, a reserved word tripping something in the host,
--- whatever), a bare call would abort build_menu() entirely and silently
--- drop every row after it — which is exactly the symptom seen live (5 of
--- 7 rows present, the last two just missing, no visible error). Now a
--- failing row prints which id failed and everything else still builds.
+-- No pcall here — confirmed live that this host's Lua doesn't expose it as
+-- a global at all (only print/error/unpack/Delay/__shutdown are documented
+-- globals, and calling pcall threw "attempt to call global 'pcall' (a nil
+-- value)"). Fatality's own console already prints a full traceback for any
+-- uncaught error anyway (seen live for that exact pcall mistake), so a
+-- bare call gets the same diagnostic for free without needing pcall at all.
 local function make_action_row(id, label, action)
-    local ok, ctrl_or_err, row = pcall(gui.MakeControlEasy, id, label, 'checkbox')
-    if not ok then
-        print('[YMHub] failed to create control "' .. id .. '": ' .. tostring(ctrl_or_err))
-        return nil
-    end
-    local ctrl = ctrl_or_err
+    local ctrl, row = gui.MakeControlEasy(id, label, 'checkbox')
     ctrl:AddCallback(function()
         if ctrl:GetValue():Get() then
             send_action(action)
