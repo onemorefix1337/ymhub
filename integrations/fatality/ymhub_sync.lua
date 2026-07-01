@@ -95,7 +95,8 @@ end
 -- match HUD from here — nudge HUD_X/HUD_Y below if it still collides with
 -- something on your actual layout.
 local HUD_X, HUD_Y = 20, 120
-local CARD_W = 280
+local CARD_W = 320
+local PAD = 20
 
 -- Deliberately staying off AddRectFilledRounded/AddGlow/AddWithBlur here —
 -- rounded corners would read nicer, but that was the one genuinely new,
@@ -148,13 +149,13 @@ local function triangle_wave(t, period)
     return phase * 2 -- 0..1..0 triangle
 end
 
--- One filled square per active flag instead of bracketed debug text
--- ("[liked]") — a row of small colored dots reads at a glance instead of
--- having to read words. Liked = pink, shuffle/repeat = accent blue when
--- on, dim gray when off (dot is always drawn so the row doesn't jump
--- around as state changes).
-local function draw_status_dots(d, x, y, alpha_mul)
-    local dot = 6
+-- Small outlined chips instead of bare dots — a thin AddRect border
+-- around each one gives the same crisp, defined edges as the card's own
+-- border rather than a soft blob, and the wider gap between them reads
+-- less cramped.
+local function draw_status_chips(d, x, y, alpha_mul)
+    local chip = 8
+    local gap = 12
     local specs = {
         { status.liked,    C_LIKED },
         { status.shuffle,  C_ACCENT },
@@ -162,8 +163,10 @@ local function draw_status_dots(d, x, y, alpha_mul)
     }
     for _, s in ipairs(specs) do
         local on, c = s[1], s[2]
-        d:AddRectFilled(draw.Rect(x, y, x + dot, y + dot), rgba(on and c or C_ACCENT_DIM, 255, alpha_mul))
-        x = x + dot + 6
+        local col = on and c or C_ACCENT_DIM
+        d:AddRectFilled(draw.Rect(x, y, x + chip, y + chip), rgba(col, on and 255 or 60, alpha_mul))
+        d:AddRect(draw.Rect(x, y, x + chip, y + chip), rgba(col, 255, alpha_mul), 1)
+        x = x + chip + gap
     end
 end
 
@@ -183,10 +186,17 @@ local function draw_hud()
     local slide = (1 - e) * 14     -- px, card eases up into its resting spot
 
     local show_time = status.seekable
-    local card_h = show_time and 106 or 84
+    local card_h = show_time and 132 or 106
     local x, y = HUD_X, HUD_Y + slide
+    local pad = PAD
 
     d:AddRectFilled(draw.Rect(x, y, x + CARD_W, y + card_h), rgba(C_CARD_BG, CARD_ALPHA, e))
+    -- Thin 1px border around the whole card — crisp defined edge instead
+    -- of a soft/flat block, same visual language as the outlined status
+    -- chips below. No rounded corners (still avoiding
+    -- AddRectFilledRounded after the crash), but a clean hairline outline
+    -- reads considerably less "flat debug box" on its own.
+    d:AddRect(draw.Rect(x, y, x + CARD_W, y + card_h), rgba(C_ACCENT_DIM, 255, e), 1)
 
     -- Accent bar: steady when paused, gently pulsing brightness while
     -- playing — cheap "alive" feel without needing a real glow primitive.
@@ -197,7 +207,6 @@ local function draw_hud()
     end
     d:AddRectFilled(draw.Rect(x, y, x + 3, y + card_h), rgba(bar_col, 255, e))
 
-    local pad = 16
     -- Long titles/artists (collab tracks especially) were rendering well
     -- past the card's own edge with no truncation at all — confirmed live.
     -- Can't slice the string itself to truncate it (that needs the
@@ -205,7 +214,7 @@ local function draw_hud()
     -- category of risk as pcall/math), so instead the drawing itself is
     -- clipped to the card's inner width: the full string is still handed
     -- to AddText, it just can't paint outside this rect. Reset back to an
-    -- unbounded clip right after, so this doesn't affect the dots/progress
+    -- unbounded clip right after, so this doesn't affect the chips/progress
     -- bar below or anything another script draws later this same frame.
     local text_clip = draw.Rect(x + pad, y, x + CARD_W - pad, y + card_h)
     local screen = draw.GetDisplay()
@@ -213,24 +222,25 @@ local function draw_hud()
 
     d:OverrideClipRect(text_clip)
 
-    -- Small caps-style label first, same role as "ЯНДЕКС МУЗЫКА" atop the
-    -- hub's own overlay — then title/artist in the hub's own order (title
-    -- first, bigger/bolder; artist smaller underneath it), not the
-    -- one-line "artist — title" this started as.
+    -- Uppercase section-label header with a divider underneath it — the
+    -- "card with a labeled header" language the redesign asked for,
+    -- rather than the label just floating above the title with nothing
+    -- separating them.
     d.font = draw.fonts['gui_main']
-    d:AddText(draw.Vec2(x + pad, y + 8), 'ЯНДЕКС МУЗЫКА', rgba(C_ACCENT, 255, e))
+    d:AddText(draw.Vec2(x + pad, y + 14), 'ЯНДЕКС МУЗЫКА', rgba(C_ACCENT, 255, e))
+    d:AddLine(draw.Vec2(x + pad, y + 32), draw.Vec2(x + CARD_W - pad, y + 32), rgba(C_ACCENT_DIM, 255, e))
 
     d.font = draw.fonts['gui_bold'] or draw.fonts['gui_main']
-    d:AddText(draw.Vec2(x + pad, y + 24), status.title or '', rgba(C_TEXT_MAIN, 255, e))
+    d:AddText(draw.Vec2(x + pad, y + 42), status.title or '', rgba(C_TEXT_MAIN, 255, e))
 
     d.font = draw.fonts['gui_main']
-    d:AddText(draw.Vec2(x + pad, y + 42), status.artist or '', rgba(C_TEXT_DIM, 255, e))
+    d:AddText(draw.Vec2(x + pad, y + 62), status.artist or '', rgba(C_TEXT_DIM, 255, e))
     d:OverrideClipRect(full_clip)
 
-    draw_status_dots(d, x + pad, y + 64, e)
+    draw_status_chips(d, x + pad, y + 86, e)
 
     if show_time then
-        local bar_y = y + card_h - 18
+        local bar_y = y + card_h - 22
         local bar_x1, bar_x2 = x + pad, x + CARD_W - pad
         d:AddRectFilled(draw.Rect(bar_x1, bar_y, bar_x2, bar_y + 3), rgba(C_BAR_BG, 255, e))
 
