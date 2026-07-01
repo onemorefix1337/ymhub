@@ -48,8 +48,20 @@ end
 -- no plain momentary "button" — each action here is a checkbox that fires
 -- on the ON edge and immediately resets itself. That also means it inherits
 -- Fatality's normal per-control hotkey binding, same as any other checkbox.
+--
+-- pcall-wrapped: with 7 near-identical calls in a row, if any single one
+-- ever throws (bad id, a reserved word tripping something in the host,
+-- whatever), a bare call would abort build_menu() entirely and silently
+-- drop every row after it — which is exactly the symptom seen live (5 of
+-- 7 rows present, the last two just missing, no visible error). Now a
+-- failing row prints which id failed and everything else still builds.
 local function make_action_row(id, label, action)
-    local ctrl, row = gui.MakeControlEasy(id, label, 'checkbox')
+    local ok, ctrl_or_err, row = pcall(gui.MakeControlEasy, id, label, 'checkbox')
+    if not ok then
+        print('[YMHub] failed to create control "' .. id .. '": ' .. tostring(ctrl_or_err))
+        return nil
+    end
+    local ctrl = ctrl_or_err
     ctrl:AddCallback(function()
         if ctrl:GetValue():Get() then
             send_action(action)
@@ -60,20 +72,34 @@ local function make_action_row(id, label, action)
     return row
 end
 
+local ACTIONS = {
+    { 'ymhub_playpause', 'Play / Pause', 'toggle' },
+    { 'ymhub_prev',      'Prev',         'prev' },
+    { 'ymhub_next',      'Next',         'next' },
+    { 'ymhub_like',      'Like',         'like' },
+    { 'ymhub_dislike',   'Dislike',      'dislike' },
+    { 'ymhub_shuffle',   'Shuffle',      'shuffle' },
+    { 'ymhub_repeat',    'Repeat',       'repeat' },
+}
+
 local function build_menu()
     local wnd = gui.GetMainWindow()
     local tab = wnd:AddTab('ymhub_tab', draw.textures['gui_icon_down'], 'YMHub', gui.TabLayoutMode.DEFAULT)
     local group = gui.Group('ymhub_group', 'Yandex Music', 160, gui.GroupWidthMode.FULL)
     tab:Add(group)
 
-    group:Add(make_action_row('ymhub_playpause', 'Play / Pause', 'toggle'))
-    group:Add(make_action_row('ymhub_prev', 'Prev', 'prev'))
-    group:Add(make_action_row('ymhub_next', 'Next', 'next'))
-    group:Add(make_action_row('ymhub_like', 'Like', 'like'))
-    group:Add(make_action_row('ymhub_dislike', 'Dislike', 'dislike'))
-    group:Add(make_action_row('ymhub_shuffle', 'Shuffle', 'shuffle'))
-    group:Add(make_action_row('ymhub_repeat', 'Repeat', 'repeat'))
+    for _, a in ipairs(ACTIONS) do
+        local row = make_action_row(a[1], a[2], a[3])
+        if row then group:Add(row) end
+    end
 end
+
+-- Top-left at y=20 sat right on top of CS2's own top HUD row (visible
+-- live — it overlapped the team/round chrome). Pushed down to clear that;
+-- still just a fixed guess since there's no way to test against a real
+-- match HUD from here — nudge HUD_X/HUD_Y below if it still collides with
+-- something on your actual layout.
+local HUD_X, HUD_Y = 20, 120
 
 local function draw_hud()
     if not status.ok then return end
@@ -81,17 +107,24 @@ local function draw_hud()
     d.font = draw.fonts['gui_main']
 
     local line1 = (status.artist or '') .. '  —  ' .. (status.title or '')
-    d:AddText(draw.Vec2(20, 20), line1, draw.Color(255, 255, 255))
-
     local state = status.playing and 'playing' or 'paused'
     if status.liked then state = state .. '  [liked]' end
     if status.shuffle then state = state .. '  [shuffle]' end
     if status.repeatOn then state = state .. '  [repeat]' end
-    d:AddText(draw.Vec2(20, 40), state, draw.Color(180, 180, 180))
+    local show_time = status.seekable
+    local time_line = show_time and ((status.posText or '0:00') .. ' / ' .. (status.durText or '0:00')) or nil
 
-    if status.seekable then
-        local time_line = (status.posText or '0:00') .. ' / ' .. (status.durText or '0:00')
-        d:AddText(draw.Vec2(20, 60), time_line, draw.Color(140, 140, 140))
+    -- Plain solid background (not the rounded/alpha variant — its exact
+    -- parameter units weren't confirmed in the docs and this isn't worth
+    -- guessing on) so the text is readable over whatever's behind it,
+    -- rather than floating bare over the game world like before.
+    local box_h = show_time and 66 or 46
+    d:AddRectFilled(draw.Rect(HUD_X - 10, HUD_Y - 10, HUD_X + 260, HUD_Y - 10 + box_h), draw.Color(10, 10, 14))
+
+    d:AddText(draw.Vec2(HUD_X, HUD_Y), line1, draw.Color(255, 255, 255))
+    d:AddText(draw.Vec2(HUD_X, HUD_Y + 20), state, draw.Color(180, 180, 180))
+    if show_time then
+        d:AddText(draw.Vec2(HUD_X, HUD_Y + 40), time_line, draw.Color(140, 140, 140))
     end
 end
 
