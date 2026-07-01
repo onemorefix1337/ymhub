@@ -132,7 +132,13 @@ local function draw_hud()
     local card_h = show_time and 78 or 60
     local x, y = HUD_X, HUD_Y
 
-    d:AddRectFilledRounded(draw.Rect(x, y, x + CARD_W, y + card_h), CARD_BG, 8)
+    -- Was AddRectFilledRounded — reverted the instant a crash was reported
+    -- right after this shipped. It was the one genuinely new, unconfirmed
+    -- native call in that update (never established what unit "amount"
+    -- actually is), so it's the prime suspect until proven otherwise.
+    -- Plain rect loses the rounded corners but is the exact same call
+    -- already proven crash-free across every earlier successful reload.
+    d:AddRectFilled(draw.Rect(x, y, x + CARD_W, y + card_h), CARD_BG)
     -- Thin left accent bar doubles as the playing/paused indicator so the
     -- state doesn't need its own text line.
     d:AddRectFilled(draw.Rect(x, y, x + 3, y + card_h), status.playing and ACCENT or ACCENT_DIM)
