@@ -927,9 +927,16 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.96);"
         L"transition:opacity .15s ease,transform .15s ease;}"
         L"#ymhub-cheat.open{opacity:1;pointer-events:auto;transform:translate(-50%,-50%) scale(1);}"
+        // Was a fully opaque #0d0d14 — backdrop-filter had nothing to
+        // actually blur behind it, so the "glass" effect never showed at
+        // all despite being declared. rgba background + a real accent-
+        // tinted glow (same language as the connect toast) is what
+        // actually reads as glass instead of just a flat dark panel.
         L"#ymhub-cheat .yc-panel{max-height:calc(100vh - 36px);overflow:auto;"
-        L"background:#0d0d14;backdrop-filter:blur(20px);"
-        L"border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;"
+        L"background:rgba(13,13,20,.74);backdrop-filter:blur(24px);"
+        L"border:1px solid rgba(91,143,255,.28);border-radius:16px;padding:16px;"
+        L"box-shadow:0 0 0 1px rgba(91,143,255,.06),0 16px 48px rgba(0,0,0,.5),"
+        L"0 0 32px rgba(91,143,255,.14);"
         L"color:rgba(255,255,255,.88);}"
         L"#ymhub-cheat .yc-head{display:flex;align-items:center;justify-content:space-between;"
         L"font-weight:700;font-size:13.5px;margin-bottom:12px;}"
