@@ -963,8 +963,17 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-rail-adv .yc-knob{width:10px;height:10px;top:2px;left:2px;}"
         L"#ymhub-cheat .yc-rail-adv.on .yc-knob{left:14px;}"
         L"#ymhub-cheat .yc-pane{flex:1;min-width:0;}"
-        L"#ymhub-cheat .yc-sec{display:none;}"
-        L"#ymhub-cheat .yc-sec.active{display:block;}"
+        // Everything else in this panel is transitioned (rail items,
+        // switches, buttons) but switching between Player/Твики/Pro itself
+        // used to be an instant display:none/block snap — the one
+        // interaction in here with zero animation. display can't be
+        // transitioned directly, but pairing it with an opacity fade-in
+        // on the same class toggle still reads as a smooth appearance
+        // (the outgoing section just disappears, which is the normal,
+        // unremarkable way tab-like panels handle the "leaving" side).
+        L"#ymhub-cheat .yc-sec{display:none;opacity:0;}"
+        L"#ymhub-cheat .yc-sec.active{display:block;opacity:1;animation:ycSecIn .18s ease;}"
+        L"@keyframes ycSecIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}"
         L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:12px;}"
         L"#ymhub-cheat .yc-cover{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.05);"
         L"object-fit:cover;flex-shrink:0;}"
@@ -1018,7 +1027,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-css{width:100%;min-height:64px;resize:vertical;"
         L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px;"
         L"color:rgba(255,255,255,.88);font:11px Consolas,\"Cascadia Code\",monospace;"
-        L"padding:8px;box-sizing:border-box;outline:none;}"
+        L"padding:8px;box-sizing:border-box;outline:none;transition:border-color .2s ease;}"
         L"#ymhub-cheat .yc-css:focus{border-color:rgba(91,143,255,.4);}"
         // Advanced-only "YM Pro" section: seek + volume + shuffle/repeat —
         // native range inputs restyled to match the rest of the panel.
