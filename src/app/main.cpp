@@ -53,6 +53,12 @@ static const int HW = 720, HH = 500;   // hub
 // ── Position ─────────────────────────────────────────────
 enum class Pos { BL=0,BC=1,BR=2,TL=3,TC=4,TR=5 };
 static Pos g_pos = Pos::BC;
+// Set once the user actually drags the overlay (see WM_EXITSIZEMOVE) —
+// overrides the preset grid with the exact dropped position. Clearing it
+// (picking one of the six preset buttons again) reverts to GetCardPos's
+// usual computed placement.
+static bool g_customPos = false;
+static int  g_posX = 0, g_posY = 0;
 
 // ── Globals ───────────────────────────────────────────────
 static HWND      g_hwnd   = nullptr;   // overlay
@@ -245,6 +251,7 @@ static void SendYmDefaultKey(int idx){
 
 // ── Position helper ───────────────────────────────────────
 static void GetCardPos(int& x,int& y){
+    if(g_customPos){x=g_posX;y=g_posY;return;}
     const int M=60;int pi=(int)g_pos;
     x=(pi==0||pi==3)?M:(pi==1||pi==4)?(g_scrW-CW)/2:g_scrW-CW-M;
     y=(pi>=3)?M:g_scrH-CH-M;}
@@ -1026,7 +1033,7 @@ static const wchar_t* HTML = LR"HTML(<!DOCTYPE html><html><head><meta charset="u
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;
   font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
-  background:#0e0e12;}
+  background:#0e0e12;-webkit-app-region:drag;}
 #bg1,#bg2{
   position:absolute;inset:-20px;
   background-size:cover;background-position:center;
@@ -1159,6 +1166,15 @@ html,body{width:100%;height:100%;overflow:hidden;
 <script>
 const $=id=>document.getElementById(id);
 function send(a){window.chrome.webview.postMessage(a)}
+// -webkit-app-region:drag alone didn't actually move the window live
+// (this overlay is WS_EX_NOACTIVATE|WS_EX_TOPMOST, and whatever internal
+// mechanism Chromium uses to turn that CSS into a real OS move apparently
+// doesn't fire the same way against a never-activates window) — so this
+// does it explicitly instead: tell the host a drag started on any
+// mousedown outside the actual buttons, and it does the standard
+// ReleaseCapture()+WM_NCLBUTTONDOWN(HTCAPTION) trick itself.
+document.body.addEventListener('mousedown',e=>{
+  if(e.button===0&&!e.target.closest('.cb'))send('drag');});
 function onPlay(){const b=$('pbtn');b.classList.remove('pop');void b.offsetWidth;b.classList.add('pop');send('toggle');}
 function onLike(){$('btn-like').classList.toggle('liked');send('like');}
 function setText(el,txt){
@@ -2247,6 +2263,16 @@ static void InitWebView(){
                                 else if(wcscmp(s,L"like")==0)    PostMessageW(g_hwnd,WM_APP+13,0,0);
                                 else if(wcscmp(s,L"dislike")==0) PostMessageW(g_hwnd,WM_APP+14,0,0);
                                 else if(wcscmp(s,L"hidden")==0)  PostMessageW(g_hwnd,WM_APP+21,0,0);
+                                // Standard borderless-window drag trick — see the
+                                // mousedown listener in HTML above for why this
+                                // exists instead of relying on -webkit-app-region
+                                // alone. Called straight from here (not posted as
+                                // a WM_APP message) since the whole point is
+                                // starting the move loop immediately on the same
+                                // down-click, not on a later queued tick.
+                                else if(wcscmp(s,L"drag")==0){
+                                    ReleaseCapture();
+                                    SendMessage(g_hwnd,WM_NCLBUTTONDOWN,HTCAPTION,0);}
                                 CoTaskMemFree(s);}
                             return S_OK;}).Get(),nullptr);
                     RECT r={0,0,CW,CH};ctrl->put_Bounds(r);
@@ -2395,10 +2421,26 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
     case WM_APP+25: ParseYM();BroadcastState();return 0;
     case WM_APP+26: // hub nav complete → send initial state + keys
         ParseYM();BroadcastState();SendHubKeys();SendHubYmKeys();SendHubTweaks();return 0;
-    case WM_APP+31: // pos change from hub
+    // Fires once when an interactive move ends — the drag itself is driven
+    // entirely by WebView2/Chromium honoring -webkit-app-region:drag on
+    // #shell's background (see HTML above), which internally does the
+    // equivalent of a native titlebar drag on this exact HWND; from here
+    // it's indistinguishable from any other window move, so this is the
+    // one place that needs to know about it at all.
+    case WM_EXITSIZEMOVE:{
+        RECT r;GetWindowRect(hw,&r);
+        g_customPos=true;g_posX=r.left;g_posY=r.top;
+        RegSetDW(HKEY_CURRENT_USER,REG_APP,L"PosCustom",1);
+        RegSetDW(HKEY_CURRENT_USER,REG_APP,L"PosX",(DWORD)g_posX);
+        RegSetDW(HKEY_CURRENT_USER,REG_APP,L"PosY",(DWORD)g_posY);
+        return 0;}
+    case WM_APP+31: // pos change from hub — picking a preset always wins
+        // over a previous drag, matching what clicking a grid cell implies.
         {int n=(int)wp;if(n>=0&&n<=5){
             g_pos=(Pos)n;
+            g_customPos=false;
             RegSetDW(HKEY_CURRENT_USER,REG_APP,L"Pos",(DWORD)g_pos);
+            RegSetDW(HKEY_CURRENT_USER,REG_APP,L"PosCustom",0);
             if(g_visible){int x,y;GetCardPos(x,y);
                 SetWindowPos(g_hwnd,HWND_TOPMOST,x,y,CW,CH,SWP_NOACTIVATE);}
             BroadcastState();}}
@@ -2449,6 +2491,9 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
     InitIPC();
     g_pos=(Pos)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"Pos",(DWORD)Pos::BC);
     if((int)g_pos<0||(int)g_pos>5)g_pos=Pos::BC;
+    g_customPos=RegGetDW(HKEY_CURRENT_USER,REG_APP,L"PosCustom",0)!=0;
+    g_posX=(int)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"PosX",0);
+    g_posY=(int)RegGetDW(HKEY_CURRENT_USER,REG_APP,L"PosY",0);
     g_scrW=GetSystemMetrics(SM_CXSCREEN);
     g_scrH=GetSystemMetrics(SM_CYSCREEN);
 
