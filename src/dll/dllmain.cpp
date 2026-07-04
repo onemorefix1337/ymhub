@@ -22,6 +22,7 @@
 #include <wincodec.h>
 #include <shcore.h>
 #include "../shared/ipc.h"
+#include "../shared/version.h"
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -46,6 +47,9 @@ static YMHubIPC*     g_ipc        = nullptr;
 static HANDLE        g_mutex      = nullptr;
 static volatile bool g_run        = false;
 static LONG          g_lastCmdSeq = 0;
+// Overlay window handle — created by UiThread (Фаза 4a). Declared this
+// early because ExecCmd (below) needs to PostMessageW to it.
+static HWND          g_hwnd       = nullptr;
 static LONG          g_lastYmSendSeq = 0;
 static LONG          g_lastTweaksSeq = 0;
 
@@ -903,10 +907,14 @@ static void CdpApplyPassportNameHide(bool on, const wchar_t* customNameW) {
 
 // ── Command execution ───────────────────────────────────────────
 static void ExecCmd(DWORD cmd) {
-    // Overlay toggle -> notify host
     if (cmd == YMHC_OVL_TOGGLE) {
-        if (g_ipc && g_ipc->hostHwnd)
-            PostMessageW(g_ipc->hostHwnd, WM_APP + 20, 0, 0);
+        // ShowOverlay() touches WebView2 COM objects that are bound to
+        // UiThread — ExecCmd itself runs on whatever thread triggered it
+        // (HotkeyThread for a hotkey, WorkerThread for a hub/IPC command),
+        // so this has to marshal over via the window's own message queue
+        // rather than calling ShowOverlay() inline. OverlayWndProc's own
+        // WM_APP+20 case (dispatched on UiThread) is what actually calls it.
+        if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 20, 0, 0);
         return;
     }
 
@@ -1988,10 +1996,6 @@ static auto AwaitOrTimeout(Op const& op, int timeoutMs) -> decltype(op.GetResult
 }
 
 // ── Track state (Фаза 2: SMTC polling, ported from main.cpp) ──
-// g_hwnd is a forward-looking placeholder for Фаза 4's real overlay
-// window — LoadArtAsync/ParseYMWork only ever PostMessage-notify it when
-// non-null, so this compiles and runs correctly before that window exists.
-static HWND          g_hwnd = nullptr;
 static std::wstring  g_track, g_artist;
 static bool          g_playing = false;
 static bool          g_liked = false;
@@ -2275,6 +2279,550 @@ static DWORD WINAPI TrackThread(LPVOID) {
     return 0;
 }
 
+// ── Overlay window (Фаза 4a: mini-player, ported from main.cpp) ──
+// Mini-player only for now — hub/settings window is Фаза 4b. g_hub/
+// g_hubCtrl/g_hubWv already exist as the eventual hook-up point;
+// BroadcastState/SendHub* below null-guard them so this compiles and
+// runs correctly before that window exists.
+static const int CW = 420, CH = 188;
+enum class Pos { BL = 0, BC = 1, BR = 2, TL = 3, TC = 4, TR = 5 };
+static Pos   g_pos = Pos::BC;
+static bool  g_customPos = false;
+static int   g_posX = 0, g_posY = 0;
+static bool  g_visible = false;
+static int   g_scrW = 0, g_scrH = 0;
+static DWORD g_uiTid = 0;
+static HWND  g_hub = nullptr; // Фаза 4b
+
+static ComPtr<ICoreWebView2Environment> g_env;
+static ComPtr<ICoreWebView2Controller>  g_ctrl;
+static ComPtr<ICoreWebView2>            g_wv;
+static bool g_wvInited = false;
+static ComPtr<ICoreWebView2Controller>  g_hubCtrl; // Фаза 4b
+static ComPtr<ICoreWebView2>            g_hubWv;   // Фаза 4b
+
+static std::wstring RegGetStr(HKEY root, const wchar_t* k, const wchar_t* v) {
+    HKEY hk; wchar_t buf[4096] = { 0 }; DWORD sz = sizeof(buf);
+    if (RegOpenKeyExW(root, k, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hk, v, nullptr, nullptr, (BYTE*)buf, &sz) != ERROR_SUCCESS) buf[0] = 0;
+        RegCloseKey(hk);
+    }
+    return buf;
+}
+static void RegSetStr(HKEY root, const wchar_t* k, const wchar_t* v, const std::wstring& s) {
+    HKEY hk;
+    RegCreateKeyExW(root, k, 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    RegSetValueExW(hk, v, 0, REG_SZ, (BYTE*)s.c_str(), (DWORD)((s.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(hk);
+}
+
+// "Твики"/cheat-menu settings — same registry values the host used to
+// own; loaded independently here now so BroadcastState/CdpApplyTweaks
+// stay correct even if no host ever runs again (Фаза 5 removes the host
+// for good). Save* still bump g_ipc->tweaksSeq exactly like the host
+// did, since WorkerThread's own tweaksSeq watch (already shipped) is
+// what actually applies them via CdpApplyTweaks/CdpApplyNameHide.
+static DWORD        g_tweaksMask = 0;
+static std::wstring g_customName;
+static std::wstring g_customCss;
+static bool         g_cheatMenuEnabled = false;
+static void PushTweaksToIPC() {
+    if (!g_ipc) return;
+    g_ipc->tweaksMask = g_tweaksMask;
+    wcsncpy_s(g_ipc->customName, g_customName.c_str(), _TRUNCATE);
+    wcsncpy_s(g_ipc->customCss, g_customCss.c_str(), _TRUNCATE);
+    g_ipc->cheatMenuEnabled = g_cheatMenuEnabled ? 1 : 0;
+    InterlockedIncrement(&g_ipc->tweaksSeq);
+}
+static void LoadTweaks() {
+    g_tweaksMask = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", 0);
+    g_customName = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName");
+    g_customCss = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss");
+    g_cheatMenuEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", 0) != 0;
+    PushTweaksToIPC();
+}
+static void SaveTweaks() {
+    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", g_tweaksMask);
+    PushTweaksToIPC();
+}
+static void SaveCheatMenuSetting(bool on) {
+    g_cheatMenuEnabled = on;
+    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", on ? 1 : 0);
+    PushTweaksToIPC();
+}
+static void SaveCustomName(const std::wstring& s) {
+    g_customName = s;
+    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName", g_customName);
+    PushTweaksToIPC();
+}
+static void SaveCustomCss(const std::wstring& s) {
+    g_customCss = s;
+    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss", g_customCss);
+    PushTweaksToIPC();
+}
+
+// ── Position helper ───────────────────────────────────────
+static void GetCardPos(int& x, int& y) {
+    if (g_customPos) { x = g_posX; y = g_posY; return; }
+    const int M = 60; int pi = (int)g_pos;
+    x = (pi == 0 || pi == 3) ? M : (pi == 1 || pi == 4) ? (g_scrW - CW) / 2 : g_scrW - CW - M;
+    y = (pi >= 3) ? M : g_scrH - CH - M;
+}
+
+static void BroadcastState() {
+    std::wstring art(g_artB64.begin(), g_artB64.end());
+    std::wstring msg =
+        L"{\"type\":\"state\""
+        L",\"track\":\"" + JsonEsc(g_track) + L"\""
+        L",\"artist\":\"" + JsonEsc(g_artist) + L"\""
+        L",\"playing\":" + (g_playing ? L"true" : L"false") +
+        L",\"liked\":" + (g_liked ? L"true" : L"false") +
+        L",\"art\":\"" + art + L"\"" +
+        L",\"dllLoaded\":true" // tautological from inside the DLL itself
+        L",\"overlayVisible\":" + (g_visible ? L"true" : L"false") +
+        L",\"pos\":" + std::to_wstring((int)g_pos) +
+        L",\"drpcEnabled\":" + (g_discordEnabled ? L"true" : L"false") +
+        L",\"drpcConnected\":" + (g_discordPipe ? L"true" : L"false") +
+        L",\"cheatMenuEnabled\":" + (g_cheatMenuEnabled ? L"true" : L"false") +
+        L",\"ver\":\"" YMHUB_VERSION_W L"\""
+        L"}";
+    if (g_wv)    g_wv->PostWebMessageAsString(msg.c_str());
+    if (g_hubWv) g_hubWv->PostWebMessageAsString(msg.c_str());
+}
+static void SendHubKeys() {
+    if (!g_hubWv) return;
+    wchar_t buf[512];
+    swprintf_s(buf,
+        L"{\"type\":\"init-keys\",\"keys\":["
+        L"{\"m\":%u,\"v\":%u},{\"m\":%u,\"v\":%u},"
+        L"{\"m\":%u,\"v\":%u},{\"m\":%u,\"v\":%u},"
+        L"{\"m\":%u,\"v\":%u},{\"m\":%u,\"v\":%u}]}",
+        g_keys[0].mods, g_keys[0].vk, g_keys[1].mods, g_keys[1].vk,
+        g_keys[2].mods, g_keys[2].vk, g_keys[3].mods, g_keys[3].vk,
+        g_keys[4].mods, g_keys[4].vk, g_keys[5].mods, g_keys[5].vk);
+    g_hubWv->PostWebMessageAsString(buf);
+}
+static void SendHubYmKeys() {
+    if (!g_hubWv) return;
+    wchar_t buf[768] = L"{\"type\":\"init-ymkeys\",\"keys\":[";
+    for (int i = 0; i < 13; i++) {
+        wchar_t part[48];
+        swprintf_s(part, L"%s{\"m\":%u,\"v\":%u}", i ? L"," : L"", g_ymKeys[i].mods, g_ymKeys[i].vk);
+        wcscat_s(buf, part);
+    }
+    wcscat_s(buf, L"]}");
+    g_hubWv->PostWebMessageAsString(buf);
+}
+static void SendHubTweaks() {
+    if (!g_hubWv) return;
+    std::wstring msg = L"{\"type\":\"init-tweaks\",\"mask\":" + std::to_wstring(g_tweaksMask) +
+        L",\"customName\":\"" + JsonEsc(g_customName) + L"\""
+        L",\"customCss\":\"" + JsonEsc(g_customCss) + L"\"}";
+    g_hubWv->PostWebMessageAsString(msg.c_str());
+}
+
+// ── Media / commands (Фаза 4a: direct ExecCmd call, no more IPC
+// round-trip needed — the hub UI and the overlay UI are now the same
+// process as CDP/CdpClickButton) ──
+static void DoPrev() { ExecCmd(YMHC_PREV); Sleep(220); ParseYM(); BroadcastState(); }
+static void DoNext() { ExecCmd(YMHC_NEXT); Sleep(220); ParseYM(); BroadcastState(); }
+static void DoToggle() { ExecCmd(YMHC_TOGGLE); g_playing = !g_playing; BroadcastState(); }
+static void DoLike() { ExecCmd(YMHC_LIKE); g_liked = !g_liked; BroadcastState(); }
+static void DoDislike() { ExecCmd(YMHC_DISLIKE); g_liked = false; Sleep(220); ParseYM(); BroadcastState(); }
+
+// ── Overlay HTML (Фаза 4a, ported from main.cpp verbatim) ──
+static const wchar_t* HTML = LR"HTML(<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;
+  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;
+  background:#0e0e12;-webkit-app-region:drag;}
+#bg1,#bg2{
+  position:absolute;inset:-20px;
+  background-size:cover;background-position:center;
+  filter:blur(30px) brightness(.36) saturate(1.7);
+  transform:scale(1.09);will-change:opacity;transition:opacity .6s ease;}
+#bg2{opacity:0;}
+#shell{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  animation:popIn .3s cubic-bezier(.34,1.5,.64,1) both;}
+#shell.out{animation:popOut .2s cubic-bezier(.55,0,1,.45) both;}
+@keyframes popIn{0%{opacity:0;transform:scale(.88) translateY(12px)}65%{transform:scale(1.02) translateY(-2px)}100%{opacity:1;transform:scale(1) translateY(0)}}
+@keyframes popOut{0%{opacity:1;transform:scale(1) translateY(0)}100%{opacity:0;transform:scale(.9) translateY(10px)}}
+#top{display:flex;align-items:center;padding:14px 16px 8px;gap:14px;flex:1;}
+#art-wrap{position:relative;flex-shrink:0;width:84px;height:84px;border-radius:10px;overflow:hidden;
+  box-shadow:0 8px 28px rgba(0,0,0,.6);transition:box-shadow .4s;}
+#art-wrap.playing{box-shadow:0 8px 28px rgba(0,0,0,.6),0 0 0 2px var(--ac,#fff3);
+  animation:artPulse 2.4s ease-in-out infinite;}
+@keyframes artPulse{0%,100%{box-shadow:0 8px 28px rgba(0,0,0,.6),0 0 0 2px var(--ac,#fff3)}50%{box-shadow:0 8px 28px rgba(0,0,0,.6),0 0 0 4px var(--ac,#fff1)}}
+#art-img{width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .35s ease;}
+#art-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,.06);font-size:30px;color:rgba(255,255,255,.25);transition:opacity .3s;}
+#eq-wrap{position:absolute;inset:0;background:rgba(0,0,0,.45);
+  display:flex;align-items:flex-end;justify-content:center;
+  padding-bottom:12px;gap:3.5px;opacity:0;transition:opacity .3s;}
+#eq-wrap.on{opacity:1;}
+.bar{width:3.5px;border-radius:3px;background:rgba(255,255,255,.92);height:3px;
+  animation:barA .7s ease-in-out infinite alternate;}
+.bar:nth-child(1){animation-name:barA;animation-duration:.52s;animation-delay:0s}
+.bar:nth-child(2){animation-name:barB;animation-duration:.81s;animation-delay:.11s}
+.bar:nth-child(3){animation-name:barA;animation-duration:.63s;animation-delay:.06s}
+.bar:nth-child(4){animation-name:barB;animation-duration:.74s;animation-delay:.19s}
+@keyframes barA{0%{height:3px}100%{height:16px}}
+@keyframes barB{0%{height:5px}100%{height:20px}}
+.bar.p{animation-play-state:paused;}
+#info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:4px;overflow:hidden;}
+#ym-label{font-size:9px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;
+  color:var(--ac,rgba(255,255,255,.4));transition:color .5s;}
+#track-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-size:17px;font-weight:700;color:#fff;line-height:1.25;text-shadow:0 1px 8px rgba(0,0,0,.4);}
+#artist-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-size:12.5px;color:rgba(255,255,255,.48);}
+.slide-in{animation:slideIn .22s cubic-bezier(.25,.8,.25,1) both;}
+.slide-out{animation:slideOut .18s ease-in both;}
+@keyframes slideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-8px)}}
+#sep{height:1px;margin:0 16px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.1) 40%,rgba(255,255,255,.1) 60%,transparent);}
+#ctrls{display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 0 12px;}
+.cb{border:none;cursor:pointer;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  -webkit-app-region:no-drag;flex-shrink:0;position:relative;overflow:hidden;
+  transition:transform .15s,background .15s,color .15s;}
+.cb::after{content:'';position:absolute;inset:0;border-radius:50%;
+  background:rgba(255,255,255,.25);transform:scale(0);opacity:1;
+  transition:transform .35s ease,opacity .35s ease;}
+.cb:active::after{transform:scale(2.2);opacity:0;transition:none;}
+.skip{width:36px;height:36px;background:rgba(255,255,255,.08);color:rgba(255,255,255,.65);}
+.skip:hover{background:rgba(255,255,255,.16);color:#fff;transform:scale(1.07);}
+.skip:active{transform:scale(.88);}
+#pbtn{width:46px;height:46px;background:var(--ac,#ffffffef);color:#000;
+  box-shadow:0 4px 20px rgba(0,0,0,.4);
+  transition:transform .15s,filter .15s,background .5s,box-shadow .5s;}
+#pbtn:hover{filter:brightness(1.15);transform:scale(1.06);}
+#pbtn:active{filter:brightness(.86);transform:scale(.91);}
+#pbtn.pop{animation:btnPop .22s cubic-bezier(.34,1.6,.64,1);}
+@keyframes btnPop{0%{transform:scale(1)}45%{transform:scale(.8)}100%{transform:scale(1)}}
+.cb svg{pointer-events:none;}
+#btn-like{width:32px;height:32px;background:rgba(255,255,255,.06);color:rgba(255,255,255,.4);transition:all .2s;}
+#btn-like:hover{background:rgba(255,80,100,.18);color:rgba(255,100,120,.9);transform:scale(1.1);}
+#btn-like.liked{background:rgba(255,60,90,.22);color:#ff4d6d;animation:heartPop .28s cubic-bezier(.34,1.6,.64,1);}
+@keyframes heartPop{0%{transform:scale(1)}40%{transform:scale(1.35)}100%{transform:scale(1)}}
+#btn-dislike{width:32px;height:32px;background:rgba(255,255,255,.06);color:rgba(255,255,255,.3);}
+#btn-dislike:hover{background:rgba(255,255,255,.12);color:rgba(255,255,255,.7);transform:scale(1.07);}
+.ctrl-sep{width:1px;height:22px;background:rgba(255,255,255,.1);margin:0 2px;flex-shrink:0;}
+</style></head><body>
+<div id="bg1"></div><div id="bg2"></div>
+<div id="shell">
+  <div id="top">
+    <div id="art-wrap">
+      <div id="art-ph">♪</div>
+      <img id="art-img">
+      <div id="eq-wrap">
+        <div class="bar p"></div><div class="bar p"></div>
+        <div class="bar p"></div><div class="bar p"></div>
+      </div>
+    </div>
+    <div id="info">
+      <div id="ym-label">Яндекс Музыка</div>
+      <div id="track-name">Нет воспроизведения</div>
+      <div id="artist-name"></div>
+    </div>
+  </div>
+  <div id="sep"></div>
+  <div id="ctrls">
+    <button class="cb skip" id="btn-prev" onclick="send('prev')">
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+        <rect x="1.5" y="1.5" width="2.5" height="12" rx="1.1"/>
+        <path d="M13 2.5 5.5 7.5 13 12.5V2.5z"/>
+      </svg>
+    </button>
+    <button class="cb" id="pbtn" onclick="onPlay()">
+      <svg id="i-play" width="17" height="17" viewBox="0 0 17 17" fill="currentColor">
+        <path d="M5.5 3.5 14 8.5 5.5 13.5V3.5z"/>
+      </svg>
+      <svg id="i-pause" width="17" height="17" viewBox="0 0 17 17" fill="currentColor" style="display:none">
+        <rect x="3.5" y="3" width="3.2" height="11" rx="1.3"/>
+        <rect x="10.3" y="3" width="3.2" height="11" rx="1.3"/>
+      </svg>
+    </button>
+    <button class="cb skip" id="btn-next" onclick="send('next')">
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor">
+        <rect x="11" y="1.5" width="2.5" height="12" rx="1.1"/>
+        <path d="M2 2.5l7.5 5L2 12.5V2.5z"/>
+      </svg>
+    </button>
+    <div class="ctrl-sep"></div>
+    <button class="cb" id="btn-like" onclick="onLike()" title="Лайк">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+      </svg>
+    </button>
+    <button class="cb" id="btn-dislike" onclick="send('dislike')" title="Дизлайк">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/>
+      </svg>
+    </button>
+  </div>
+</div>
+<canvas id="cv" style="display:none" width="200" height="200"></canvas>
+<script>
+const $=id=>document.getElementById(id);
+function send(a){window.chrome.webview.postMessage(a)}
+document.body.addEventListener('mousedown',e=>{
+  if(e.button===0&&!e.target.closest('.cb'))send('drag');});
+function onPlay(){const b=$('pbtn');b.classList.remove('pop');void b.offsetWidth;b.classList.add('pop');send('toggle');}
+function onLike(){$('btn-like').classList.toggle('liked');send('like');}
+function setText(el,txt){
+  if(el.textContent===txt)return;
+  el.classList.remove('slide-in','slide-out');void el.offsetWidth;
+  el.classList.add('slide-out');
+  setTimeout(()=>{el.textContent=txt;el.classList.remove('slide-out');el.classList.add('slide-in');},160);}
+function extractAccent(img){
+  const cv=$('cv'),ctx=cv.getContext('2d');
+  ctx.drawImage(img,0,0,128,128);
+  let sR=0,sG=0,sB=0,wt=0;
+  for(let x=4;x<124;x+=8){for(let y=4;y<124;y+=8){
+    const d=ctx.getImageData(x,y,1,1).data;
+    const r=d[0],g=d[1],b=d[2];
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+    const sat=mx>0?(mx-mn)/mx:0;
+    const lig=(mx+mn)/510;
+    if(lig>0.08&&lig<0.93&&sat>0.15){
+      const w=sat*sat;sR+=r*w;sG+=g*w;sB+=b*w;wt+=w;}
+  }}
+  let R,G,B;
+  if(wt<0.5){R=91;G=143;B=255;}
+  else{const r=sR/wt|0,g=sG/wt|0,b=sB/wt|0;
+    const mx=Math.max(r,g,b)||1,k=Math.min(255/mx,1.9);
+    R=Math.min(255,r*k|0);G=Math.min(255,g*k|0);B=Math.min(255,b*k|0);}
+  document.documentElement.style.setProperty('--ac',`rgb(${R},${G},${B})`);}
+let bgActive=1;
+function setBg(src){
+  const next=bgActive===1?$('bg2'):$('bg1'),curr=bgActive===1?$('bg1'):$('bg2');
+  next.style.backgroundImage=`url(${src})`;next.style.opacity='1';curr.style.opacity='0';
+  bgActive=bgActive===1?2:1;}
+function loadArt(src){
+  const img=$('art-img');img.style.opacity='0';$('art-ph').style.opacity='0';
+  const tmp=new Image();
+  tmp.onload=()=>{
+    img.src=src;img.style.transition='none';img.style.transform='scale(.85)';void img.offsetWidth;
+    img.style.transition='opacity .3s ease,transform .35s cubic-bezier(.34,1.4,.64,1)';
+    img.style.opacity='1';img.style.transform='scale(1)';extractAccent(tmp);setBg(src);};
+  tmp.src=src;}
+let lastArt='',lastPlaying=null,lastLiked=null;
+window.chrome.webview.addEventListener('message',e=>{
+  const d=JSON.parse(e.data);
+  if(d.type==='hide'){$('shell').classList.add('out');setTimeout(()=>send('hidden'),210);return;}
+  if(d.type==='show'){
+    const s=$('shell');s.classList.remove('out');s.style.animation='none';
+    void s.offsetWidth;s.style.animation='';return;}
+  if(d.type!=='state')return;
+  setText($('track-name'),d.track||'Нет воспроизведения');
+  setText($('artist-name'),d.artist||'');
+  const playing=!!d.playing;
+  if(playing!==lastPlaying){lastPlaying=playing;
+    $('i-play').style.display=playing?'none':'';$('i-pause').style.display=playing?'':'none';
+    $('art-wrap').classList.toggle('playing',playing);}
+  const liked=!!d.liked;
+  if(liked!==lastLiked){lastLiked=liked;$('btn-like').classList.toggle('liked',liked);}
+  document.querySelectorAll('.bar').forEach(b=>b.classList.toggle('p',!playing));
+  $('eq-wrap').classList.toggle('on',playing&&!!d.art);
+  if(d.art&&d.art!==lastArt){lastArt=d.art;loadArt('data:image/png;base64,'+d.art);}
+  else if(!d.art&&lastArt){lastArt='';$('art-img').style.opacity='0';
+    setTimeout(()=>{$('art-ph').style.opacity='1';},320);
+    $('bg1').style.backgroundImage='none';$('bg2').style.backgroundImage='none';
+    document.documentElement.style.setProperty('--ac','rgba(255,255,255,.7)');}
+});
+</script></body></html>)HTML";
+
+static void SetupController(ICoreWebView2Controller* ctrl, ICoreWebView2* wv, bool isHub) {
+    ComPtr<ICoreWebView2Controller2> c2;
+    if (SUCCEEDED(ctrl->QueryInterface(IID_PPV_ARGS(&c2))))
+        c2->put_DefaultBackgroundColor({ 0,0,0,0 });
+    ComPtr<ICoreWebView2Settings> stt; wv->get_Settings(&stt);
+    if (stt) {
+        stt->put_AreDefaultContextMenusEnabled(FALSE);
+        stt->put_IsStatusBarEnabled(FALSE);
+        stt->put_AreDevToolsEnabled(FALSE);
+    }
+    (void)isHub;
+}
+
+// Фаза 4b will add the hub controller here too — deliberately not yet,
+// so a null g_hub is never handed to CreateCoreWebView2Controller.
+static void InitWebView() {
+    // Separate profile dir from main.cpp's own "YMHub.WebView2" — this
+    // DLL and a still-running old-architecture host can otherwise both be
+    // alive at once during the migration, and two WebView2 environments
+    // can't safely share one profile directory.
+    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+    std::wstring userDataFolder = std::wstring(tmp) + L"YMHubDll.WebView2";
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, userDataFolder.c_str(), nullptr,
+        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+            [](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
+                if (!env) { LogMsg("WebView2 environment creation FAILED"); return S_OK; }
+                g_env = env;
+                env->CreateCoreWebView2Controller(g_hwnd,
+                    Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                        [](HRESULT, ICoreWebView2Controller* ctrl) -> HRESULT {
+                            if (!ctrl) { LogMsg("WebView2 controller creation FAILED"); return S_OK; }
+                            g_ctrl = ctrl; ctrl->get_CoreWebView2(&g_wv);
+                            SetupController(ctrl, g_wv.Get(), false);
+                            g_wv->add_WebMessageReceived(
+                                Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
+                                        LPWSTR s = nullptr; a->TryGetWebMessageAsString(&s);
+                                        if (s) {
+                                            if (wcscmp(s, L"prev") == 0)         PostMessageW(g_hwnd, WM_APP + 10, 0, 0);
+                                            else if (wcscmp(s, L"next") == 0)    PostMessageW(g_hwnd, WM_APP + 11, 0, 0);
+                                            else if (wcscmp(s, L"toggle") == 0)  PostMessageW(g_hwnd, WM_APP + 12, 0, 0);
+                                            else if (wcscmp(s, L"like") == 0)    PostMessageW(g_hwnd, WM_APP + 13, 0, 0);
+                                            else if (wcscmp(s, L"dislike") == 0) PostMessageW(g_hwnd, WM_APP + 14, 0, 0);
+                                            else if (wcscmp(s, L"hidden") == 0)  PostMessageW(g_hwnd, WM_APP + 21, 0, 0);
+                                            // Standard borderless-window drag trick — see the
+                                            // mousedown listener in HTML above.
+                                            else if (wcscmp(s, L"drag") == 0) {
+                                                ReleaseCapture();
+                                                SendMessage(g_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                                            }
+                                            CoTaskMemFree(s);
+                                        }
+                                        return S_OK;
+                                    }).Get(), nullptr);
+                            RECT r = { 0,0,CW,CH }; ctrl->put_Bounds(r);
+                            g_wv->add_NavigationCompleted(
+                                Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+                                        PostMessageW(g_hwnd, WM_APP + 25, 0, 0); return S_OK;
+                                    }).Get(), nullptr);
+                            g_wv->NavigateToString(HTML);
+                            LogMsg("Overlay WebView2 ready");
+                            return S_OK;
+                        }).Get());
+                return S_OK;
+            }).Get());
+}
+
+static void ShowOverlay() {
+    if (!g_visible) {
+        g_visible = true;
+        int x, y; GetCardPos(x, y);
+        SetWindowPos(g_hwnd, HWND_TOPMOST, x, y, CW, CH, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        if (!g_wvInited) { g_wvInited = true; InitWebView(); }
+        else {
+            if (g_ctrl) { RECT r = { 0,0,CW,CH }; g_ctrl->put_Bounds(r); g_ctrl->put_IsVisible(TRUE); }
+            if (g_wv) g_wv->PostWebMessageAsString(L"{\"type\":\"show\"}");
+            ParseYM(); BroadcastState();
+        }
+    } else {
+        g_visible = false;
+        if (g_wv) g_wv->PostWebMessageAsString(L"{\"type\":\"hide\"}");
+        else ShowWindow(g_hwnd, SW_HIDE);
+    }
+    BroadcastState();
+}
+
+static LRESULT CALLBACK OverlayWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: { PAINTSTRUCT ps; BeginPaint(hw, &ps); EndPaint(hw, &ps); return 0; }
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_APP + 10: DoPrev();    return 0;
+    case WM_APP + 11: DoNext();    return 0;
+    case WM_APP + 12: DoToggle();  return 0;
+    case WM_APP + 13: DoLike();    return 0;
+    case WM_APP + 14: DoDislike(); return 0;
+    case WM_APP + 20: ShowOverlay(); return 0;
+    case WM_APP + 27: BroadcastState(); return 0; // ParseYM worker finished
+    case WM_APP + 21:
+        if (g_ctrl) g_ctrl->put_IsVisible(FALSE);
+        ShowWindow(hw, SW_HIDE);
+        g_visible = false;
+        BroadcastState();
+        return 0;
+    case WM_APP + 25: ParseYM(); BroadcastState(); return 0;
+    case WM_APP + 26: // Фаза 4b: hub nav complete → send initial state + keys
+        ParseYM(); BroadcastState(); SendHubKeys(); SendHubYmKeys(); SendHubTweaks(); return 0;
+    // Fires once when an interactive move ends — see main.cpp's own
+    // identical comment; drag itself is driven by WebView2/Chromium
+    // honoring -webkit-app-region:drag (see HTML above).
+    case WM_EXITSIZEMOVE: {
+        RECT r; GetWindowRect(hw, &r);
+        g_customPos = true; g_posX = r.left; g_posY = r.top;
+        RegSetDW(HKEY_CURRENT_USER, REG_APP, L"PosCustom", 1);
+        RegSetDW(HKEY_CURRENT_USER, REG_APP, L"PosX", (DWORD)g_posX);
+        RegSetDW(HKEY_CURRENT_USER, REG_APP, L"PosY", (DWORD)g_posY);
+        return 0;
+    }
+    case WM_APP + 31: // Фаза 4b: pos change from hub — picking a preset
+        // always wins over a previous drag.
+    {
+        int n = (int)wp; if (n >= 0 && n <= 5) {
+            g_pos = (Pos)n;
+            g_customPos = false;
+            RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Pos", (DWORD)g_pos);
+            RegSetDW(HKEY_CURRENT_USER, REG_APP, L"PosCustom", 0);
+            if (g_visible) {
+                int x, y; GetCardPos(x, y);
+                SetWindowPos(g_hwnd, HWND_TOPMOST, x, y, CW, CH, SWP_NOACTIVATE);
+            }
+            BroadcastState();
+        }
+        return 0;
+    }
+    case WM_APP + 3:
+        EnterCriticalSection(&g_artCS);
+        if (g_artReady.load()) { g_artB64 = g_artPending; g_artPending.clear(); g_artReady = false; }
+        LeaveCriticalSection(&g_artCS);
+        BroadcastState();
+        return 0;
+    }
+    return DefWindowProcW(hw, msg, wp, lp);
+}
+
+static DWORD WINAPI UiThread(LPVOID) {
+    g_uiTid = GetCurrentThreadId();
+    // WebView2's environment creation is COM-backed and fails outright
+    // with CO_E_NOTINITIALIZED without this — main.cpp's wWinMain got it
+    // for free from its own winrt::init_apartment() near process startup;
+    // this thread needs its own since it's the one actually calling into
+    // WebView2, not the thread DllMain ran on.
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
+
+    LoadTweaks();
+    g_pos = (Pos)RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Pos", (DWORD)Pos::BC);
+    if ((int)g_pos < 0 || (int)g_pos > 5) g_pos = Pos::BC;
+    g_customPos = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"PosCustom", 0) != 0;
+    g_posX = (int)RegGetDW(HKEY_CURRENT_USER, REG_APP, L"PosX", 0);
+    g_posY = (int)RegGetDW(HKEY_CURRENT_USER, REG_APP, L"PosY", 0);
+    g_scrW = GetSystemMetrics(SM_CXSCREEN);
+    g_scrH = GetSystemMetrics(SM_CYSCREEN);
+
+    WNDCLASSEXW wc = { sizeof(wc),0,OverlayWndProc,0,0,g_hInst,
+        nullptr,nullptr,(HBRUSH)GetStockObject(NULL_BRUSH),nullptr,L"YMHubOvl",nullptr };
+    RegisterClassExW(&wc);
+    g_hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        L"YMHubOvl", L"YMHub Overlay", WS_POPUP,
+        0, 0, CW, CH, nullptr, nullptr, g_hInst, nullptr);
+    LogMsg(g_hwnd ? "Overlay window created" : "Overlay window creation FAILED");
+    if (g_hwnd) {
+        BOOL dark = TRUE; DwmSetWindowAttribute(g_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        DWM_WINDOW_CORNER_PREFERENCE cp = DWMWCP_ROUND;
+        DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cp, sizeof(cp));
+    }
+
+    g_wvInited = true;
+    InitWebView();
+
+    MSG m;
+    while (g_run && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    return 0;
+}
+
 // ── Worker thread ───────────────────────────────────────────────
 static DWORD WINAPI WorkerThread(LPVOID) {
     // Open or create shared memory
@@ -2363,10 +2911,12 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID) {
         g_run = true;
         CreateThread(nullptr, 0, HotkeyThread, nullptr, 0, nullptr);
         CreateThread(nullptr, 0, WorkerThread,  nullptr, 0, nullptr);
+        CreateThread(nullptr, 0, UiThread,      nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         g_run = false;
-        // Wake up hotkey message loop so it can exit
+        // Wake up hotkey/UI message loops so they can exit
         if (g_hkTid) PostThreadMessageW(g_hkTid, WM_QUIT, 0, 0);
+        if (g_uiTid) PostThreadMessageW(g_uiTid, WM_QUIT, 0, 0);
     }
     return TRUE;
 }
