@@ -1726,9 +1726,22 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
 // YM's own window once the debug port is reachable (host may still be
 // finishing the relaunch-with-flag dance at this point): checking ->
 // success, or checking -> error if the page isn't the player we expect.
+// 5 steps, each held on screen for a minimum stretch (STEP_MIN) rather
+// than flashing by as fast as the underlying work actually completes —
+// deliberately slower and more visible, on request. Every step still
+// corresponds to something this thread genuinely does; the last two
+// (settings, initial state) used to just happen silently a moment later
+// via LogBadgeThread's own first 2s tick — pulled forward into this
+// sequence so they're both real work AND visible progress instead of
+// two separate things.
+static const DWORD STEP_MIN_MS = 550;
+
 static DWORD WINAPI CdpAnnounceThread(LPVOID) {
+    DWORD stepStart;
     LogMsg("Connecting to CDP on port " + std::to_string(CdpPort()) + "...");
-    CdpInitToastStep(1, 3, L"Поиск процесса Яндекс Музыки");
+
+    stepStart = GetTickCount();
+    CdpInitToastStep(1, 5, L"Поиск процесса Яндекс Музыки");
     for (int i = 0; i < 30 && g_run; i++) {
         if (CdpEnsureConnected()) break;
         Sleep(500);
@@ -1739,10 +1752,41 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
         return 0;
     }
     LogMsg("CDP connected");
-    CdpInitToastStep(2, 3, L"Подключение к DevTools Protocol");
-    CdpInitToastStep(3, 3, L"Проверка готовности плеера");
-    if (CdpVerifyPlayerReady()) { LogMsg("Player ready"); CdpInitToastDone(true, L"Подключено"); }
-    else { LogMsg("Player not found"); CdpInitToastDone(false, L"Не удалось найти плеер Яндекс Музыки"); }
+    DWORD elapsed = GetTickCount() - stepStart;
+    if (elapsed < STEP_MIN_MS) Sleep(STEP_MIN_MS - elapsed);
+
+    CdpInitToastStep(2, 5, L"Подключение к DevTools Protocol");
+    Sleep(STEP_MIN_MS);
+
+    CdpInitToastStep(3, 5, L"Проверка готовности плеера");
+    stepStart = GetTickCount();
+    bool ready = CdpVerifyPlayerReady();
+    elapsed = GetTickCount() - stepStart;
+    if (elapsed < STEP_MIN_MS) Sleep(STEP_MIN_MS - elapsed);
+    if (!ready) {
+        LogMsg("Player not found");
+        CdpInitToastDone(false, L"Не удалось найти плеер Яндекс Музыки");
+        return 0;
+    }
+    LogMsg("Player ready");
+
+    CdpInitToastStep(4, 5, L"Применение сохранённых настроек");
+    if (g_ipc) {
+        CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
+        bool hideName = (g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0;
+        CdpApplyNameHide(hideName, g_ipc->customName);
+        CdpApplyPassportNameHide(hideName, g_ipc->customName);
+    }
+    Sleep(STEP_MIN_MS);
+
+    CdpInitToastStep(5, 5, L"Оптимизация интерфейса");
+    if (g_ipc) {
+        g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
+        wcsncpy_s(g_ipc->coverUrl, CdpQueryCoverUrl().c_str(), _TRUNCATE);
+    }
+    Sleep(STEP_MIN_MS);
+
+    CdpInitToastDone(true, L"Подключено");
     return 0;
 }
 
