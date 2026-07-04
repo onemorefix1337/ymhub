@@ -13,7 +13,8 @@ set_property(TARGET YMHubDll PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
 target_include_directories(YMHubDll PRIVATE "${WV2_SDK}/build/native/include")
 target_link_libraries(YMHubDll PRIVATE
     "${WV2_SDK}/build/native/x64/WebView2LoaderStatic.lib"
-    user32 kernel32 gdi32 dwmapi)
+    user32 kernel32 gdi32 dwmapi
+    runtimeobject windowscodecs shcore ole32 oleaut32)
 set_target_properties(YMHubDll PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     OUTPUT_NAME "YMHubDll")

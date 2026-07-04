@@ -10,15 +10,30 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <atomic>
+#include <thread>
+#include <ctime>
 #include <cstdlib>
 #include <cstdio>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <wincodec.h>
+#include <shcore.h>
 #include "../shared/ipc.h"
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "runtimeobject.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 
 using namespace Microsoft::WRL;
+namespace wmc = winrt::Windows::Media::Control;
 
 #define YM_CDP_PORT 9876
 
@@ -51,6 +66,12 @@ static DWORD RegGetDW(HKEY root, const wchar_t* k, const wchar_t* v, DWORD def) 
         RegCloseKey(hk);
     }
     return d;
+}
+static void RegSetDW(HKEY root, const wchar_t* k, const wchar_t* v, DWORD d) {
+    HKEY hk;
+    RegCreateKeyExW(root, k, 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    RegSetValueExW(hk, v, 0, REG_DWORD, (BYTE*)&d, sizeof(d));
+    RegCloseKey(hk);
 }
 
 // Hotkey thread state
@@ -1935,6 +1956,325 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     return 0;
 }
 
+// ── Base64 (Фаза 2: album-art WIC pipeline, ported from main.cpp) ──
+static const char B64T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static std::string Base64Enc(const BYTE* d, size_t n) {
+    std::string r; r.reserve(((n + 2) / 3) * 4);
+    for (size_t i = 0; i < n; i += 3) {
+        DWORD v = d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        r += B64T[(v >> 18) & 0x3F]; r += B64T[(v >> 12) & 0x3F];
+        r += (i + 1 < n) ? B64T[(v >> 6) & 0x3F] : '=';
+        r += (i + 2 < n) ? B64T[v & 0x3F] : '=';
+    }
+    return r;
+}
+
+// Bounded wait on a WinRT async op — SMTC's broker can hang indefinitely
+// on a flaky session, so every call here is polled with a hard timeout
+// instead of a blocking .get(), same reasoning as the DLL's own WinHTTP
+// timeout handling elsewhere.
+template<typename Op>
+static auto AwaitOrTimeout(Op const& op, int timeoutMs) -> decltype(op.GetResults()) {
+    using winrt::Windows::Foundation::AsyncStatus;
+    ULONGLONG start = GetTickCount64();
+    while (op.Status() == AsyncStatus::Started) {
+        if (GetTickCount64() - start > (ULONGLONG)timeoutMs) {
+            op.Cancel();
+            throw winrt::hresult_error(E_ABORT);
+        }
+        Sleep(20);
+    }
+    return op.GetResults();
+}
+
+// ── Track state (Фаза 2: SMTC polling, ported from main.cpp) ──
+// g_hwnd is a forward-looking placeholder for Фаза 4's real overlay
+// window — LoadArtAsync/ParseYMWork only ever PostMessage-notify it when
+// non-null, so this compiles and runs correctly before that window exists.
+static HWND          g_hwnd = nullptr;
+static std::wstring  g_track, g_artist;
+static bool          g_playing = false;
+static bool          g_liked = false;
+static std::string   g_artB64;
+static std::wstring  g_artTrackKey;
+static std::atomic<bool> g_artReady{ false };
+static std::string       g_artPending;
+static CRITICAL_SECTION  g_artCS;
+static volatile bool     g_artFetching = false;
+static volatile bool     g_parsing = false;
+
+static void LoadArtAsync(winrt::Windows::Storage::Streams::IRandomAccessStreamReference ref, std::wstring trackKey) {
+    std::thread([ref, trackKey]()mutable {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        std::string b64;
+        // Thumbnail reads can hang or fail transiently (same flaky SMTC
+        // broker as elsewhere, plus art that isn't cached locally yet) —
+        // bound the wait and retry a couple of times before giving up.
+        for (int attempt = 0; attempt < 3 && b64.empty(); attempt++) {
+            if (attempt > 0)Sleep(400);
+            try {
+                auto openOp = ref.OpenReadAsync();
+                auto ras = AwaitOrTimeout(openOp, 3000);
+                if (!ras)continue;
+                winrt::com_ptr<IStream> cs;
+                if (FAILED(CreateStreamOverRandomAccessStream(winrt::get_unknown(ras), IID_PPV_ARGS(cs.put()))))throw 0;
+                IWICImagingFactory* wic = nullptr;
+                CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+                if (!wic)throw 0;
+                IWICBitmapDecoder* dec = nullptr;
+                wic->CreateDecoderFromStream(cs.get(), nullptr, WICDecodeMetadataCacheOnLoad, &dec);
+                if (!dec) { wic->Release(); throw 0; }
+                IWICBitmapFrameDecode* fr = nullptr; dec->GetFrame(0, &fr); dec->Release();
+                if (!fr) { wic->Release(); throw 0; }
+                IWICBitmapScaler* sc2 = nullptr; wic->CreateBitmapScaler(&sc2);
+                sc2->Initialize(fr, 128, 128, WICBitmapInterpolationModeFant);
+                IWICFormatConverter* cv = nullptr; wic->CreateFormatConverter(&cv);
+                cv->Initialize(sc2, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+                fr->Release(); sc2->Release();
+                UINT w = 0, h = 0; cv->GetSize(&w, &h);
+                std::vector<BYTE> px(w * h * 4);
+                cv->CopyPixels(nullptr, w * 4, (UINT)px.size(), px.data());
+                cv->Release(); wic->Release();
+                // WIC outputs BGRA bytes; swap R<->B so PNG is correct RGBA
+                for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);
+                IWICImagingFactory* wic2 = nullptr;
+                CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic2));
+                IWICStream* ws = nullptr; wic2->CreateStream(&ws);
+                IStream* ms = nullptr; CreateStreamOnHGlobal(nullptr, TRUE, &ms);
+                ws->InitializeFromIStream(ms);
+                IWICBitmapEncoder* enc = nullptr; wic2->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
+                enc->Initialize(ws, WICBitmapEncoderNoCache);
+                IWICBitmapFrameEncode* fe = nullptr; IPropertyBag2* opts = nullptr;
+                enc->CreateNewFrame(&fe, &opts); fe->Initialize(opts);
+                fe->SetSize(w, h); WICPixelFormatGUID pf = GUID_WICPixelFormat32bppRGBA;
+                fe->SetPixelFormat(&pf);
+                fe->WritePixels(h, w * 4, (UINT)px.size(), px.data());
+                fe->Commit(); enc->Commit();
+                HGLOBAL hg = nullptr; GetHGlobalFromStream(ms, &hg);
+                SIZE_T sz = GlobalSize(hg); void* ptr = GlobalLock(hg);
+                b64 = Base64Enc((BYTE*)ptr, sz); GlobalUnlock(hg);
+                fe->Release(); enc->Release(); if (opts)opts->Release();
+                ws->Release(); ms->Release(); wic2->Release();
+            } catch (...) { b64 = ""; }
+        }
+        g_artFetching = false;
+        // Drop the result if the user already moved to a different track
+        // while this (possibly slow/retried) fetch was in flight, so a
+        // late failure can't blank out art that's already correct, and a
+        // late success can't paint the wrong track's cover.
+        if (g_artTrackKey != trackKey)return;
+        if (b64.empty())return; // let the next track-poll tick retry instead of latching empty
+        EnterCriticalSection(&g_artCS);
+        g_artPending = b64; g_artReady = true;
+        LeaveCriticalSection(&g_artCS);
+        if (g_hwnd)PostMessageW(g_hwnd, WM_APP + 3, 0, 0);
+        }).detach();
+}
+
+// The actual SMTC fetch, including the timeout-bounded waits. Runs off
+// a dedicated thread (see ParseYM below) so the up-to-3s worst case from
+// AwaitOrTimeout never blocks anything else in the DLL.
+static void ParseYMWork() {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    HWND hw = g_hwnd;
+    bool justChangedTrack = false;
+    try {
+        auto mgrOp = wmc::GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
+        auto mgr = AwaitOrTimeout(mgrOp, 1500);
+        if (mgr) {
+            wmc::GlobalSystemMediaTransportControlsSession ym = nullptr;
+            for (auto s : mgr.GetSessions())
+                if (s.SourceAppUserModelId() == L"ru.yandex.desktop.music") { ym = s; break; }
+            if (!ym)ym = mgr.GetCurrentSession();
+            if (ym) {
+                auto propOp = ym.TryGetMediaPropertiesAsync();
+                auto p = AwaitOrTimeout(propOp, 1500);
+                if (p && !p.Title().empty()) {
+                    std::wstring track = p.Title().c_str();
+                    g_track = track; g_artist = p.Artist().c_str();
+                    g_playing = (ym.GetPlaybackInfo().PlaybackStatus() ==
+                        wmc::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+                    bool changed = (g_artTrackKey != track);
+                    if (changed) { g_artTrackKey = track; g_artB64 = ""; g_liked = false; justChangedTrack = true; }
+                    // Retry every poll while art is still missing for the
+                    // current track — SMTC's Thumbnail() is sometimes not
+                    // populated yet on the very first poll after a track
+                    // change, and without this it never got fetched again.
+                    if (g_artB64.empty() && !g_artFetching && p.Thumbnail()) {
+                        g_artFetching = true;
+                        LoadArtAsync(p.Thumbnail(), track);
+                    }
+                }
+            }
+        }
+    } catch (...) {}
+    // Resync with the DLL's own CDP-polled liked state (LogBadgeThread) —
+    // corrects the optimistic toggle in DoLike()/DoDislike() (Фаза 4) if
+    // it ever drifts, and picks up likes made outside the hub entirely
+    // (YM's own UI, remapped native hotkeys, or a track already liked on
+    // load). Skipped right on a track change: CDP polls independently on
+    // its own ~2s cadence, so g_ipc->ymLiked can still hold the *previous*
+    // track's state for up to that long — applying it here would flash
+    // the old status before that poll catches up, instead of the correct
+    // assume-unliked default set above.
+    if (g_ipc && !justChangedTrack)g_liked = (g_ipc->ymLiked != 0);
+    g_parsing = false;
+    if (hw)PostMessageW(hw, WM_APP + 27, 0, 0);
+}
+
+static void ParseYM() {
+    if (g_parsing)return;
+    g_parsing = true;
+    std::thread(ParseYMWork).detach();
+}
+
+// ── JSON helpers (Фаза 2) ──────────────────────────────────
+static std::wstring JsonEsc(const std::wstring& s) {
+    std::wstring r; for (wchar_t c : s) {
+        if (c == L'"')r += L"\\\"";
+        else if (c == L'\\')r += L"\\\\";
+        else if (c == L'\n')r += L"\\n";
+        else r += c;
+    }
+    return r;
+}
+static std::string ToUtf8(const std::wstring& w) {
+    if (w.empty())return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string r(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), r.data(), n, nullptr, nullptr);
+    return r;
+}
+
+// ── Discord Rich Presence (Фаза 2, ported from main.cpp) ────
+// No SDK, just Discord's local RPC pipe protocol: connect to
+// \\.\pipe\discord-ipc-N (N=0..9), send a one-time handshake frame, then
+// a SET_ACTIVITY frame whenever the track changes. Each frame is an
+// 8-byte header (int32 opcode, int32 length) followed by that many bytes
+// of JSON, all through overlapped reads/writes with a short timeout — a
+// hung or unresponsive Discord must not be able to stall this thread.
+static const char* DISCORD_CLIENT_ID = "1518944722310266911";
+static HANDLE g_discordPipe = nullptr;
+static HANDLE g_discordEvt = nullptr;
+static bool   g_discordEnabled = false;
+static time_t g_discordStart = 0;
+static std::wstring g_discordLastTrack, g_discordLastArtist, g_discordLastCover;
+static bool g_discordWasSent = false;
+
+static void LoadDiscordSetting() {
+    g_discordEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"DiscordRpc", 0) != 0;
+}
+static void SaveDiscordSetting(bool on) {
+    g_discordEnabled = on;
+    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"DiscordRpc", on ? 1 : 0);
+}
+
+static void DiscordClose() {
+    if (g_discordPipe) { CloseHandle(g_discordPipe); g_discordPipe = nullptr; }
+}
+
+static bool DiscordIo(bool isWrite, void* buf, DWORD len, DWORD timeoutMs) {
+    if (!g_discordPipe)return false;
+    OVERLAPPED ov = {}; ov.hEvent = g_discordEvt; ResetEvent(g_discordEvt);
+    BOOL ok = isWrite ? WriteFile(g_discordPipe, buf, len, nullptr, &ov) : ReadFile(g_discordPipe, buf, len, nullptr, &ov);
+    if (!ok) {
+        if (GetLastError() != ERROR_IO_PENDING)return false;
+        if (WaitForSingleObject(g_discordEvt, timeoutMs) != WAIT_OBJECT_0) { CancelIoEx(g_discordPipe, &ov); return false; }
+    }
+    DWORD xferred = 0;
+    return GetOverlappedResult(g_discordPipe, &ov, &xferred, FALSE) && xferred == len;
+}
+
+static bool DiscordSendFrame(int opcode, const std::string& json) {
+    BYTE hdr[8]; DWORD len = (DWORD)json.size();
+    memcpy(hdr, &opcode, 4); memcpy(hdr + 4, &len, 4);
+    if (!DiscordIo(true, hdr, 8, 300))return false;
+    if (len && !DiscordIo(true, (void*)json.data(), len, 300))return false;
+    return true;
+}
+
+// Measured empirically: Discord's very first handshake reply (the READY
+// dispatch, carrying its whole user/config blob) can take ~850ms — way
+// past what a steady-state ack needs — so the handshake recv gets its own
+// much longer allowance than regular frames.
+static bool DiscordRecvFrame(DWORD timeoutMs = 500) {
+    BYTE hdr[8];
+    if (!DiscordIo(false, hdr, 8, timeoutMs))return false;
+    DWORD len; memcpy(&len, hdr + 4, 4);
+    if (len > 65536)return false;
+    std::string body(len, '\0');
+    if (len && !DiscordIo(false, body.data(), len, timeoutMs))return false;
+    return true;
+}
+
+static bool DiscordConnect() {
+    if (g_discordPipe)return true;
+    if (!g_discordEvt)g_discordEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    for (int i = 0; i < 10; i++) {
+        wchar_t path[64]; swprintf_s(path, L"\\\\.\\pipe\\discord-ipc-%d", i);
+        HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE) { g_discordPipe = h; break; }
+    }
+    if (!g_discordPipe)return false; // Discord isn't running — not an error, just nothing to do yet
+    std::string hs = std::string("{\"v\":1,\"client_id\":\"") + DISCORD_CLIENT_ID + "\"}";
+    if (!DiscordSendFrame(0, hs) || !DiscordRecvFrame(3000)) { DiscordClose(); return false; }
+    return true;
+}
+
+static void DiscordClearActivity() {
+    if (!DiscordConnect())return;
+    std::string activity = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + std::to_string(GetCurrentProcessId()) +
+        ",\"activity\":null},\"nonce\":\"ymhub-clear\"}";
+    if (!DiscordSendFrame(1, activity) || !DiscordRecvFrame())DiscordClose();
+}
+
+// Called every ~2s from a dedicated thread (DiscordThreadFn) — track/
+// artist/playing are read without synchronization, same as other cross-
+// thread state in this DLL; a torn read here just means presence updates
+// a tick late.
+static void DiscordTick() {
+    if (!g_discordEnabled) {
+        if (g_discordWasSent) { DiscordClearActivity(); g_discordWasSent = false; g_discordLastTrack.clear(); g_discordLastCover.clear(); }
+        return;
+    }
+    if (!g_playing || g_track.empty()) {
+        if (g_discordWasSent) { DiscordClearActivity(); g_discordWasSent = false; g_discordLastTrack.clear(); g_discordLastCover.clear(); }
+        return;
+    }
+    std::wstring cover = g_ipc ? g_ipc->coverUrl : L"";
+    if (g_track == g_discordLastTrack && g_artist == g_discordLastArtist && cover == g_discordLastCover && g_discordWasSent)
+        return; // nothing actually changed — don't spam SET_ACTIVITY
+    if (g_track != g_discordLastTrack || g_artist != g_discordLastArtist)g_discordStart = time(nullptr);
+    if (!DiscordConnect())return;
+    std::string details = ToUtf8(JsonEsc(g_track));
+    std::string state = ToUtf8(JsonEsc(g_artist));
+    std::string assets;
+    if (!cover.empty())
+        assets = ",\"assets\":{\"large_image\":\"" + ToUtf8(JsonEsc(cover)) + "\",\"large_text\":\"" + details + "\"}";
+    std::string activity =
+        "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + std::to_string(GetCurrentProcessId()) +
+        ",\"activity\":{\"type\":2,\"details\":\"" + details + "\",\"state\":\"" + state + "\","
+        "\"timestamps\":{\"start\":" + std::to_string((long long)g_discordStart) + "}" + assets + ","
+        "\"instance\":false}},\"nonce\":\"ymhub-set\"}";
+    if (DiscordSendFrame(1, activity) && DiscordRecvFrame()) {
+        g_discordLastTrack = g_track; g_discordLastArtist = g_artist; g_discordLastCover = cover; g_discordWasSent = true;
+    } else DiscordClose(); // reconnect from scratch next tick
+}
+
+static DWORD WINAPI DiscordThreadFn(LPVOID) {
+    while (g_run) { DiscordTick(); Sleep(2000); }
+    return 0;
+}
+
+// Drives ParseYM on the same ~2s cadence the host used to via its overlay
+// window's TIMER_TRACK (OnTrackTick) — now a standalone thread since no
+// window exists yet to own a Win32 timer (Фаза 4 adds one; BroadcastState,
+// OnTrackTick's other half, is UI-only and stays out of scope until then).
+static DWORD WINAPI TrackThread(LPVOID) {
+    while (g_run) { ParseYM(); Sleep(2000); }
+    return 0;
+}
+
 // ── Worker thread ───────────────────────────────────────────────
 static DWORD WINAPI WorkerThread(LPVOID) {
     // Open or create shared memory
@@ -1949,10 +2289,14 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     // Advertise DLL presence via named mutex
     g_mutex = CreateMutexW(nullptr, TRUE, YMH_MUTEX_NAME);
     LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
+    InitializeCriticalSection(&g_artCS);
+    LoadDiscordSetting();
     CreateThread(nullptr, 0, CdpAnnounceThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LogBadgeThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, CheatMenuThreadFn, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, HttpBridgeThreadFn, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, TrackThread, nullptr, 0, nullptr);
+    CreateThread(nullptr, 0, DiscordThreadFn, nullptr, 0, nullptr);
 
     g_lastCmdSeq = g_ipc->cmdSeq;
     g_lastKeySeq = g_ipc->keySeq;
