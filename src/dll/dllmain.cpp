@@ -270,78 +270,91 @@ static void CdpRunJs(const std::string& jsUtf8) {
     std::string resp; CdpRecv(resp);
 }
 
-// ── Material 3 (You) staged connect animation, injected into YM's page ──
-// Stage 1 (checking): a tonal card with a spinning M3 progress ring around
-// a player glyph, "Проверка синхронизации…". Stage 2 (success): ring
-// stops, "YMHub" wordmark springs in below it, auto-dismisses. Stage 3
-// (error): ring stops, glyph/text turn to M3 error tone, the message is
-// written directly on screen and stays up longer. All three stages share
-// one persistent #ymhub-status container so transitions are smooth. Built
-// via plain DOM calls (no innerHTML/backticks) so the only quoting to
-// worry about is the outer JSON-escape.
-static void CdpShowStage1Checking() {
+// ── Compact step-counter connect toast, injected into YM's page ──
+// A small non-blocking corner card (icon badge + title/status + "N of M"
+// counter + a thin accent glow) instead of the old full-screen dimmed
+// modal — walks the real connect sequence (CDP connect -> player-ready
+// poll) as honest, distinct steps rather than one generic "checking"
+// message, then settles into a success/error state and auto-dismisses.
+// Built via plain DOM calls (no innerHTML/backticks) so the only quoting
+// to worry about is the outer JSON-escape.
+static void CdpInitToastEnsure() {
     std::wstring js =
         L"(function(){if(document.getElementById('ymhub-status'))return;"
         L"var o=document.createElement('div');o.id='ymhub-status';"
-        L"o.style.cssText='position:fixed;inset:0;z-index:999999;display:flex;"
-        L"align-items:center;justify-content:center;background:rgba(0,0,0,.5);"
-        L"opacity:0;transition:opacity .35s ease;pointer-events:none;';"
-        L"var st=document.createElement('style');"
-        L"st.textContent='@keyframes ymhubSpin{to{transform:rotate(360deg)}}';"
-        L"document.head.appendChild(st);"
-        L"var card=document.createElement('div');"
-        L"card.style.cssText='display:flex;flex-direction:column;align-items:center;"
-        L"background:#1D1B2A;border-radius:28px;padding:32px 44px;"
-        L"box-shadow:0 12px 40px rgba(0,0,0,.5);min-width:200px;';"
-        L"var iw=document.createElement('div');"
-        L"iw.style.cssText='position:relative;width:64px;height:64px;"
-        L"display:flex;align-items:center;justify-content:center;margin-bottom:16px;';"
-        L"var spin=document.createElement('div');spin.id='ymhub-spin';"
-        L"spin.style.cssText='position:absolute;inset:0;border-radius:50%;"
-        L"border:4px solid rgba(182,166,255,.22);border-top-color:#B7A6FF;"
-        L"animation:ymhubSpin .9s linear infinite;';"
-        L"var icon=document.createElement('div');icon.id='ymhub-icon';"
-        L"icon.textContent='\\u266A';"
-        L"icon.style.cssText='font-size:26px;color:#B7A6FF;transition:color .3s ease;';"
-        L"iw.appendChild(spin);iw.appendChild(icon);"
+        L"o.style.cssText='position:fixed;top:20px;right:20px;z-index:999999;"
+        L"opacity:0;transform:translateY(-8px);"
+        L"transition:opacity .3s ease,transform .3s ease;pointer-events:none;';"
+        L"var card=document.createElement('div');card.id='ymhub-status-card';"
+        L"card.style.cssText='display:flex;align-items:center;gap:12px;"
+        L"background:rgba(13,13,20,.88);backdrop-filter:blur(16px);"
+        L"border:1px solid rgba(91,143,255,.35);border-radius:14px;padding:12px 16px;"
+        L"box-shadow:0 0 0 1px rgba(91,143,255,.08),0 8px 28px rgba(0,0,0,.45),"
+        L"0 0 24px rgba(91,143,255,.18);min-width:230px;"
+        L"transition:border-color .3s ease,box-shadow .3s ease;';"
+        L"var badge=document.createElement('div');badge.id='ymhub-status-badge';"
+        L"badge.style.cssText='width:32px;height:32px;flex-shrink:0;border-radius:9px;"
+        L"background:#5B8FFF;display:flex;align-items:center;justify-content:center;"
+        L"font-size:15px;color:#fff;transition:background .3s ease;';"
+        L"badge.textContent='\\u266A';"
+        L"var body=document.createElement('div');body.style.cssText='flex:1;min-width:0;';"
+        L"var row=document.createElement('div');"
+        L"row.style.cssText='display:flex;align-items:baseline;justify-content:space-between;gap:8px;';"
         L"var title=document.createElement('div');title.id='ymhub-title';"
         L"title.textContent='YMHub';"
-        L"title.style.cssText='font:700 20px system-ui,sans-serif;color:#E6E1E9;"
-        L"letter-spacing:.3px;opacity:0;transform:scale(.7);margin-top:2px;"
-        L"transition:opacity .4s ease,transform .45s cubic-bezier(.34,1.56,.64,1);';"
+        L"title.style.cssText='font:600 13.5px \"Segoe UI Variable Text\",\"Segoe UI\",sans-serif;"
+        L"color:rgba(255,255,255,.92);';"
+        L"var step=document.createElement('div');step.id='ymhub-step';"
+        L"step.style.cssText='font:500 11px \"Segoe UI Variable Text\",\"Segoe UI\",sans-serif;"
+        L"color:rgba(255,255,255,.4);white-space:nowrap;';"
+        L"row.appendChild(title);row.appendChild(step);"
         L"var sub=document.createElement('div');sub.id='ymhub-sub';"
-        L"sub.textContent='Проверка синхронизации\\u2026';"
-        L"sub.style.cssText='font:500 13px system-ui,sans-serif;color:#C9C4D0;"
-        L"margin-top:6px;text-align:center;transition:color .3s ease;';"
-        L"card.appendChild(iw);card.appendChild(title);card.appendChild(sub);"
+        L"sub.style.cssText='font:400 12px \"Segoe UI Variable Text\",\"Segoe UI\",sans-serif;"
+        L"color:rgba(255,255,255,.55);margin-top:2px;transition:color .3s ease;"
+        L"overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';"
+        L"body.appendChild(row);body.appendChild(sub);"
+        L"card.appendChild(badge);card.appendChild(body);"
         L"o.appendChild(card);document.body.appendChild(o);"
-        L"requestAnimationFrame(function(){o.style.opacity='1';});})()";
+        L"requestAnimationFrame(function(){o.style.opacity='1';o.style.transform='translateY(0)';});})()";
     CdpRunJs(CdpUtf8(js.c_str()));
 }
 
-static void CdpShowStage2Success() {
+static void CdpInitToastStep(int step, int total, const wchar_t* label) {
+    CdpInitToastEnsure();
     std::wstring js =
-        L"(function(){var s=document.getElementById('ymhub-spin');if(s)s.style.display='none';"
-        L"var t=document.getElementById('ymhub-title');"
-        L"if(t){t.style.opacity='1';t.style.transform='scale(1)';}"
-        L"var sub=document.getElementById('ymhub-sub');if(sub)sub.textContent='Подключено';"
-        L"setTimeout(function(){var o=document.getElementById('ymhub-status');"
-        L"if(o){o.style.opacity='0';setTimeout(function(){o.remove();},400);}},1600);})()";
+        L"(function(){var sub=document.getElementById('ymhub-sub');if(sub)sub.textContent='";
+    js += label;
+    js += L"';var st=document.getElementById('ymhub-step');if(st)st.textContent='";
+    js += std::to_wstring(step) + L" \\u0438\\u0437 " + std::to_wstring(total);
+    js += L"';})()";
     CdpRunJs(CdpUtf8(js.c_str()));
 }
 
-static void CdpShowStage3Error(const wchar_t* message) {
+static void CdpInitToastDone(bool ok, const wchar_t* message) {
     std::wstring js =
-        L"(function(){var s=document.getElementById('ymhub-spin');if(s)s.style.display='none';"
-        L"var icon=document.getElementById('ymhub-icon');"
-        L"if(icon){icon.textContent='!';icon.style.color='#FFB4AB';}"
-        L"var sub=document.getElementById('ymhub-sub');"
-        L"if(sub){sub.style.color='#FFB4AB';sub.textContent='";
-    js += message;
-    js +=
-        L"';}"
-        L"setTimeout(function(){var o=document.getElementById('ymhub-status');"
-        L"if(o){o.style.opacity='0';setTimeout(function(){o.remove();},400);}},4500);})()";
+        L"(function(){var badge=document.getElementById('ymhub-status-badge');"
+        L"var card=document.getElementById('ymhub-status-card');"
+        L"var sub=document.getElementById('ymhub-sub');var st=document.getElementById('ymhub-step');"
+        L"if(st)st.remove();";
+    if (ok) {
+        js +=
+            L"if(badge)badge.style.background='#3DD68C';"
+            L"if(card)card.style.borderColor='rgba(61,214,140,.35)';"
+            L"if(sub){sub.style.color='rgba(255,255,255,.7)';sub.textContent='";
+        js += message;
+        js += L"';}";
+    } else {
+        js +=
+            L"if(badge){badge.style.background='#FF5B6E';badge.textContent='!';}"
+            L"if(card)card.style.borderColor='rgba(255,91,110,.4)';"
+            L"if(sub){sub.style.color='#FF9AA6';sub.textContent='";
+        js += message;
+        js += L"';}";
+    }
+    js += L"setTimeout(function(){var o=document.getElementById('ymhub-status');"
+        L"if(o){o.style.opacity='0';o.style.transform='translateY(-8px);';"
+        L"setTimeout(function(){o.remove();},350);}},";
+    js += ok ? L"1800);})()" : L"4500);})()";
     CdpRunJs(CdpUtf8(js.c_str()));
 }
 
@@ -1708,15 +1721,21 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
 // success, or checking -> error if the page isn't the player we expect.
 static DWORD WINAPI CdpAnnounceThread(LPVOID) {
     LogMsg("Connecting to CDP on port " + std::to_string(CdpPort()) + "...");
+    CdpInitToastStep(1, 3, L"Поиск процесса Яндекс Музыки");
     for (int i = 0; i < 30 && g_run; i++) {
         if (CdpEnsureConnected()) break;
         Sleep(500);
     }
-    if (!g_cdpWs) { LogMsg("CDP connect failed after 30 attempts"); return 0; }
+    if (!g_cdpWs) {
+        LogMsg("CDP connect failed after 30 attempts");
+        CdpInitToastDone(false, L"Не удалось подключиться к Яндекс Музыке");
+        return 0;
+    }
     LogMsg("CDP connected");
-    CdpShowStage1Checking();
-    if (CdpVerifyPlayerReady()) { LogMsg("Player ready"); CdpShowStage2Success(); }
-    else { LogMsg("Player not found"); CdpShowStage3Error(L"Не удалось найти плеер Яндекс Музыки"); }
+    CdpInitToastStep(2, 3, L"Подключение к DevTools Protocol");
+    CdpInitToastStep(3, 3, L"Проверка готовности плеера");
+    if (CdpVerifyPlayerReady()) { LogMsg("Player ready"); CdpInitToastDone(true, L"Подключено"); }
+    else { LogMsg("Player not found"); CdpInitToastDone(false, L"Не удалось найти плеер Яндекс Музыки"); }
     return 0;
 }
 
