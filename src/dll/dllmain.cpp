@@ -34,11 +34,61 @@ static LONG          g_lastCmdSeq = 0;
 static LONG          g_lastYmSendSeq = 0;
 static LONG          g_lastTweaksSeq = 0;
 
+// Captured from DllMain's first parameter — needed for SetWindowsHookExW,
+// which wants the HINSTANCE of the module that actually contains the hook
+// procedure (this DLL now, not whatever GetModuleHandleW(nullptr) would
+// resolve to inside an injected context — that's YM's own EXE module,
+// which would be semantically wrong even if it happened to work).
+static HINSTANCE g_hInst = nullptr;
+
+// ── Registry (Фаза 1: hotkey config now read directly here instead of
+// via the host->DLL IPC copy — see LoadKeys/LoadYmKeys below) ──
+static const wchar_t* REG_APP = L"Software\\YMHub";
+static DWORD RegGetDW(HKEY root, const wchar_t* k, const wchar_t* v, DWORD def) {
+    HKEY hk; DWORD d = def, sz = sizeof(d);
+    if (RegOpenKeyExW(root, k, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        RegQueryValueExW(hk, v, nullptr, nullptr, (BYTE*)&d, &sz);
+        RegCloseKey(hk);
+    }
+    return d;
+}
+
 // Hotkey thread state
 static HWND          g_hkWnd      = nullptr;
 static DWORD         g_hkTid      = 0;
 static LONG          g_lastKeySeq = -1;
 static bool          g_regIds[6]  = {};
+static HHOOK         g_hook       = nullptr;
+
+// Overlay-toggle/prev/next/toggle/like/dislike hotkeys — mirrors main.cpp's
+// own g_keys/KEY_REG/KEY_DEF exactly (same registry values, so either side
+// reads whatever the other last wrote there).
+static IPCKey g_keys[6] = {};
+static const wchar_t* KEY_REG[6] = { L"Key0", L"Key1", L"Key2", L"Key3", L"Key4", L"Key5" };
+static const DWORD    KEY_DEF[6] = { 0x30031, 0x30025, 0x30027, 0x30020, 0, 0 };
+static void LoadKeys() {
+    for (int i = 0; i < 6; i++) {
+        DWORD v = RegGetDW(HKEY_CURRENT_USER, REG_APP, KEY_REG[i], KEY_DEF[i]);
+        g_keys[i] = { v >> 16, v & 0xFFFF };
+    }
+}
+
+// YM's own native "Горячие клавиши" remap table + defaults — mirrors
+// main.cpp's g_ymKeys/YMKEY_REG/YM_DEFAULT_VK, same order (play/pause,
+// mute, seek fwd/back, vol up/down, like, dislike, repeat, shuffle,
+// next, prev, fullscreen).
+static IPCKey g_ymKeys[13] = {};
+static const wchar_t* YMKEY_REG[13] = {
+    L"YmKey0", L"YmKey1", L"YmKey2", L"YmKey3", L"YmKey4", L"YmKey5", L"YmKey6",
+    L"YmKey7", L"YmKey8", L"YmKey9", L"YmKey10", L"YmKey11", L"YmKey12" };
+static const DWORD YM_DEFAULT_VK[13] = {
+    'K', 'M', 'L', 'J', VK_UP, VK_DOWN, 'F', 'D', 'R', 'S', 'N', 'P', 'W' };
+static void LoadYmKeys() {
+    for (int i = 0; i < 13; i++) {
+        DWORD v = RegGetDW(HKEY_CURRENT_USER, REG_APP, YMKEY_REG[i], 0);
+        g_ymKeys[i] = { v >> 16, v & 0xFFFF };
+    }
+}
 
 // Custom message: worker thread -> hotkey thread to re-register keys
 #define WM_REFRESHHK (WM_APP + 1)
@@ -1675,12 +1725,16 @@ static void RefreshHotkeys() {
             g_regIds[i] = false;
         }
     }
-    if (!g_ipc) return;
+    // Фаза 1: was g_ipc->keys[i], now reads the registry directly — the
+    // hub UI that actually edits these still lives host-side for now
+    // (Фаза 4), so g_ipc->keySeq is still what wakes this up (see
+    // WorkerThread), but the values themselves come from here, not IPC.
+    LoadKeys();
     // Register configured keys
     for (int i = 0; i < 6; i++) {
-        DWORD vk = g_ipc->keys[i].vk;
+        DWORD vk = g_keys[i].vk;
         if (vk) {
-            UINT mods = HostToWinMods(g_ipc->keys[i].mods);
+            UINT mods = HostToWinMods(g_keys[i].mods);
             g_regIds[i] = !!RegisterHotKey(g_hkWnd, i, mods, vk);
             char b[96];
             sprintf_s(b, "RegisterHotKey id=%d mods=%u vk=%u -> %s (err=%lu)",
@@ -1710,6 +1764,52 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hw, msg, wp, lp);
 }
 
+// Фаза 1: moved from main.cpp's LLKeyProc — detects the user's own
+// hotkeys plus YM's native "Горячие клавиши" being shadowed by a remap,
+// so the original default key can still be emitted via CDP
+// (CdpSendYmKey) even though the real key was suppressed. Originally
+// had an "if DLL not loaded yet, handle via host PostMessage instead"
+// fallback branch — moot now that this hook only ever runs *as* the
+// DLL, so the direct ExecCmd() path (same one HotkeyWndProc's own
+// WM_HOTKEY handler already uses) is unconditional. FindMainWnd() (this
+// file, finds a window belonging to the current process) replaces the
+// host's FindYM() (which searched *other* processes' windows) — from
+// inside the DLL, "the YM window" is just "our own process's window".
+static LRESULT CALLBACK LLKeyProc(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) &&
+        !(g_ipc && g_ipc->rebinding)) {
+        auto* k = (KBDLLHOOKSTRUCT*)lp;
+        bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool sh   = (GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0;
+        bool alt  = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;
+        DWORD mods = (ctrl ? 1u : 0u) | (sh ? 2u : 0u) | (alt ? 4u : 0u);
+        for (int i = 0; i < 6; i++)
+            if (g_keys[i].vk && mods == g_keys[i].mods && k->vkCode == g_keys[i].vk) {
+                static const DWORD cmds[6] = {
+                    YMHC_OVL_TOGGLE, YMHC_PREV, YMHC_NEXT,
+                    YMHC_TOGGLE, YMHC_LIKE, YMHC_DISLIKE };
+                ExecCmd(cmds[i]);
+                return 1;
+            }
+        // YM's own native hotkeys — only act while YM's own window is
+        // foreground (real, non-injected input); the translated keypress
+        // itself still has to go out via CDP, see CdpSendYmKey.
+        static HWND s_ymWin = nullptr; static ULONGLONG s_ymTick = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now - s_ymTick > 500) { s_ymWin = FindMainWnd(); s_ymTick = now; }
+        if (s_ymWin && GetForegroundWindow() == s_ymWin) {
+            for (int i = 0; i < 13; i++)
+                if (g_ymKeys[i].vk && mods == g_ymKeys[i].mods && k->vkCode == g_ymKeys[i].vk)
+                    { CdpSendYmKey(i); return 1; }
+            if (mods == 0)
+                for (int i = 0; i < 13; i++)
+                    if (k->vkCode == YM_DEFAULT_VK[i] && g_ymKeys[i].vk && g_ymKeys[i].vk != YM_DEFAULT_VK[i])
+                        return 1;
+        }
+    }
+    return CallNextHookEx(g_hook, code, wp, lp);
+}
+
 static DWORD WINAPI HotkeyThread(LPVOID) {
     g_hkTid = GetCurrentThreadId();
 
@@ -1723,6 +1823,15 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
         0, 0, 0, 0, HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!g_hkWnd) return 1;
 
+    LoadYmKeys();
+    // WH_KEYBOARD_LL needs a message pump on the installing thread to
+    // actually receive callbacks — this thread already has one (below),
+    // unlike main.cpp's old host thread this is replacing which needed
+    // no special justification since a GUI app's main thread always
+    // pumps messages anyway.
+    g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LLKeyProc, g_hInst, 0);
+    LogMsg(g_hook ? "LLKeyProc hook installed" : "LLKeyProc hook FAILED");
+
     // Message loop — WM_HOTKEY is dispatched to HotkeyWndProc
     MSG m;
     while (g_run && GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -1730,6 +1839,7 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
         DispatchMessageW(&m);
     }
 
+    if (g_hook) { UnhookWindowsHookEx(g_hook); g_hook = nullptr; }
     for (int i = 0; i < 6; i++)
         if (g_regIds[i]) UnregisterHotKey(g_hkWnd, i);
     DestroyWindow(g_hkWnd);
@@ -1903,8 +2013,9 @@ static DWORD WINAPI WorkerThread(LPVOID) {
 // answered; src/dll/CMakeLists.txt keeps the WebView2 SDK linkage this
 // proved out, ready for the real overlay/hub window port (Фаза 4).
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_hInst = hInst;
         g_run = true;
         CreateThread(nullptr, 0, HotkeyThread, nullptr, 0, nullptr);
         CreateThread(nullptr, 0, WorkerThread,  nullptr, 0, nullptr);
