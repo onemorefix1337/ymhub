@@ -77,6 +77,60 @@ static void RegSetDW(HKEY root, const wchar_t* k, const wchar_t* v, DWORD d) {
     RegSetValueExW(hk, v, 0, REG_DWORD, (BYTE*)&d, sizeof(d));
     RegCloseKey(hk);
 }
+static std::wstring RegGetStr(HKEY root, const wchar_t* k, const wchar_t* v) {
+    HKEY hk; wchar_t buf[4096] = { 0 }; DWORD sz = sizeof(buf);
+    if (RegOpenKeyExW(root, k, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hk, v, nullptr, nullptr, (BYTE*)buf, &sz) != ERROR_SUCCESS) buf[0] = 0;
+        RegCloseKey(hk);
+    }
+    return buf;
+}
+static void RegSetStr(HKEY root, const wchar_t* k, const wchar_t* v, const std::wstring& s) {
+    HKEY hk;
+    RegCreateKeyExW(root, k, 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
+    RegSetValueExW(hk, v, 0, REG_SZ, (BYTE*)s.c_str(), (DWORD)((s.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(hk);
+}
+
+// Настройки твиков/своего CSS — раньше эти же значения реестра принадлежали
+// хосту; теперь читаются независимо здесь же, чтобы BroadcastState/
+// CdpApplyTweaks были верны даже без хоста вообще (Фаза 5 удаляет хост
+// насовсем). Save* по-прежнему увеличивают g_ipc->tweaksSeq — существующий
+// tweaksSeq-watch в WorkerThread уже применяет их через CdpApplyTweaks/
+// CdpApplyNameHide, второй путь применения не нужен.
+static DWORD        g_tweaksMask = 0;
+static std::wstring g_customName;
+static std::wstring g_customCss;
+static bool         g_cheatMenuEnabled = false;
+static void PushTweaksToIPC() {
+    if (!g_ipc) return;
+    g_ipc->tweaksMask = g_tweaksMask;
+    wcsncpy_s(g_ipc->customName, g_customName.c_str(), _TRUNCATE);
+    wcsncpy_s(g_ipc->customCss, g_customCss.c_str(), _TRUNCATE);
+    g_ipc->cheatMenuEnabled = g_cheatMenuEnabled ? 1 : 0;
+    InterlockedIncrement(&g_ipc->tweaksSeq);
+}
+static void LoadTweaks() {
+    g_tweaksMask = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", 0);
+    g_customName = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName");
+    g_customCss = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss");
+    g_cheatMenuEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", 0) != 0;
+    PushTweaksToIPC();
+}
+static void SaveTweaks() {
+    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", g_tweaksMask);
+    PushTweaksToIPC();
+}
+static void SaveCustomName(const std::wstring& s) {
+    g_customName = s;
+    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName", g_customName);
+    PushTweaksToIPC();
+}
+static void SaveCustomCss(const std::wstring& s) {
+    g_customCss = s;
+    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss", g_customCss);
+    PushTweaksToIPC();
+}
 
 // Hotkey thread state
 static HWND          g_hkWnd      = nullptr;
@@ -955,17 +1009,17 @@ static void ExecCmd(DWORD cmd) {
     PostMessageW(w, WM_KEYUP,   vk, 1 | (sc << 16) | 0xC0000000);
 }
 
-// ── In-page "cheat menu" overlay (beta) ──────────────────────────
-// Full YMHub UI rendered directly inside YM's own page instead of a
-// separate WebView2 window — toggled by tapping Shift alone while YM
-// has focus (a deliberate *tap*, not held: a keydown immediately
-// followed by another key's keydown before Shift's keyup is treated as
-// a real Shift+letter combo and ignored, so normal capitalized typing
-// elsewhere on the page never false-triggers it). Player controls reuse
-// ExecCmd directly (no IPC round-trip needed — this *is* the process
-// that already executes those commands); tweaks/CSS additionally relay
-// to the host via reqSeq/reqText purely so registry persistence and the
-// standalone hub window stay in sync (see HandleUiMessage in main.cpp).
+// ── In-page "cheat menu" overlay — now the ONLY settings surface ──
+// (no tray, no separate hub window — see the plan's Фаза 3/4 notes) —
+// rendered directly inside YM's own page, always injected (CheatMenuThreadFn
+// below no longer gates this behind a toggle), toggled visible by tapping
+// Shift alone while YM has focus (a deliberate *tap*, not held: a keydown
+// immediately followed by another key's keydown before Shift's keyup is
+// treated as a real Shift+letter combo and ignored, so normal capitalized
+// typing elsewhere on the page never false-triggers it). Player controls
+// reuse ExecCmd directly (no IPC round-trip needed — this *is* the process
+// that already executes those commands); tweaks/CSS go through
+// SaveTweaks/SaveCustomCss directly (registry + tweaksSeq bump).
 //
 // Scoped to [data-test-id='PLAYERBAR_DESKTOP'] for reading now-playing
 // state (track/artist/cover/like/play — all stable data-test-id's found
@@ -979,23 +1033,6 @@ static const wchar_t* kTweakLabels[9] = {
     L"Барабан рекомендаций", L"Плашка «Моя волна обновилась»", L"Лишние разделы меню",
     L"Плюс-бейдж в профиле", L"Крупная обложка трека", L"Скрыть имя пользователя",
 };
-
-// Tears down the overlay's DOM/style/listeners entirely instead of just
-// leaving them inert — a disabled "feature" that still has a live
-// document-wide keydown/keyup hook installed wouldn't really be off.
-static void CdpRemoveMenu() {
-    std::string js =
-        "(function(){"
-        "var r=document.getElementById('ymhub-cheat');if(r)r.remove();"
-        "var s=document.getElementById('ymhub-cheat-style');if(s)s.remove();"
-        "if(window.__ymhubShiftDown){"
-        "document.removeEventListener('keydown',window.__ymhubShiftDown,true);"
-        "document.removeEventListener('keyup',window.__ymhubShiftUp,true);"
-        "window.__ymhubShiftDown=null;window.__ymhubShiftUp=null;}"
-        "if(window.__ymhubSyncTimer){clearInterval(window.__ymhubSyncTimer);window.__ymhubSyncTimer=null;}"
-        "})()";
-    CdpRunJs(js);
-}
 
 static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
     std::wstring js;
@@ -1433,10 +1470,9 @@ static bool IsPlainNumber(const std::string& s) {
 
 // Dispatches one queued action from the overlay. Playback commands reuse
 // ExecCmd directly — see the block comment above CdpInjectMenu for why
-// that needs no IPC hop. Tweaks/CSS apply immediately (CdpApplyTweaks)
-// for instant visual feedback *and* relay to the host (reqSeq/reqText)
-// purely so registry persistence and the standalone hub window agree —
-// same message text HandleUiMessage already parses, just one source.
+// that needs no IPC hop. Tweaks/CSS go through SaveTweaks/SaveCustomCss
+// (registry + tweaksSeq bump) — WorkerThread's own tweaksSeq watch is
+// what actually re-runs CdpApplyTweaks, same as any other tweak change.
 static void DispatchCheatAction(const std::string& item) {
     if (item == "like")    { ExecCmd(YMHC_LIKE);    return; }
     if (item == "dislike") { ExecCmd(YMHC_DISLIKE); return; }
@@ -1489,15 +1525,11 @@ static void DispatchCheatAction(const std::string& item) {
         CdpRunJs(js);
         return;
     }
-    if (!g_ipc) return;
     if (item.rfind("tweak:", 0) == 0) {
         int idx = atoi(item.c_str() + 6);
         if (idx < 0 || idx >= 9) return;
-        DWORD newMask = g_ipc->tweaksMask ^ (1u << idx);
-        CdpApplyTweaks(newMask, g_ipc->customCss);
-        std::wstring relay = L"toggle-tweak:" + std::to_wstring(idx);
-        wcsncpy_s(g_ipc->reqText, relay.c_str(), _TRUNCATE);
-        InterlockedIncrement(&g_ipc->reqSeq);
+        g_tweaksMask ^= (1u << idx);
+        SaveTweaks();
         return;
     }
     if (item.rfind("css:", 0) == 0) {
@@ -1505,10 +1537,7 @@ static void DispatchCheatAction(const std::string& item) {
         int wlen = MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), nullptr, 0);
         std::wstring cssW(wlen, 0);
         if (wlen > 0) MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), cssW.data(), wlen);
-        CdpApplyTweaks(g_ipc->tweaksMask, cssW.c_str());
-        std::wstring relay = L"set-custom-css:" + cssW;
-        wcsncpy_s(g_ipc->reqText, relay.c_str(), _TRUNCATE);
-        InterlockedIncrement(&g_ipc->reqSeq);
+        SaveCustomCss(cssW);
         return;
     }
 }
@@ -1716,18 +1745,15 @@ static DWORD WINAPI HttpBridgeThreadFn(LPVOID) {
     return 0;
 }
 
+// Always on — this in-page menu (Shift inside YM) is now the only
+// settings surface at all (no tray, no separate hub window), so it can't
+// be an opt-in feature gated behind a toggle that used to live in the
+// hub itself. See CdpInjectMenu/CdpRemoveMenu above for what it renders.
 static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
-    bool wasEnabled = false;
     while (g_run) {
         if (g_ipc && CdpEnsureConnected()) {
-            bool enabled = g_ipc->cheatMenuEnabled != 0;
-            if (enabled) {
-                CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
-                CdpQueueDrain();
-            } else if (wasEnabled) {
-                CdpRemoveMenu(); // just turned off — tear down what's there
-            }
-            wasEnabled = enabled;
+            CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
+            CdpQueueDrain();
         }
         Sleep(300);
     }
@@ -2300,66 +2326,6 @@ static ComPtr<ICoreWebView2>            g_wv;
 static bool g_wvInited = false;
 static ComPtr<ICoreWebView2Controller>  g_hubCtrl; // Фаза 4b
 static ComPtr<ICoreWebView2>            g_hubWv;   // Фаза 4b
-
-static std::wstring RegGetStr(HKEY root, const wchar_t* k, const wchar_t* v) {
-    HKEY hk; wchar_t buf[4096] = { 0 }; DWORD sz = sizeof(buf);
-    if (RegOpenKeyExW(root, k, 0, KEY_READ, &hk) == ERROR_SUCCESS) {
-        if (RegQueryValueExW(hk, v, nullptr, nullptr, (BYTE*)buf, &sz) != ERROR_SUCCESS) buf[0] = 0;
-        RegCloseKey(hk);
-    }
-    return buf;
-}
-static void RegSetStr(HKEY root, const wchar_t* k, const wchar_t* v, const std::wstring& s) {
-    HKEY hk;
-    RegCreateKeyExW(root, k, 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr);
-    RegSetValueExW(hk, v, 0, REG_SZ, (BYTE*)s.c_str(), (DWORD)((s.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(hk);
-}
-
-// "Твики"/cheat-menu settings — same registry values the host used to
-// own; loaded independently here now so BroadcastState/CdpApplyTweaks
-// stay correct even if no host ever runs again (Фаза 5 removes the host
-// for good). Save* still bump g_ipc->tweaksSeq exactly like the host
-// did, since WorkerThread's own tweaksSeq watch (already shipped) is
-// what actually applies them via CdpApplyTweaks/CdpApplyNameHide.
-static DWORD        g_tweaksMask = 0;
-static std::wstring g_customName;
-static std::wstring g_customCss;
-static bool         g_cheatMenuEnabled = false;
-static void PushTweaksToIPC() {
-    if (!g_ipc) return;
-    g_ipc->tweaksMask = g_tweaksMask;
-    wcsncpy_s(g_ipc->customName, g_customName.c_str(), _TRUNCATE);
-    wcsncpy_s(g_ipc->customCss, g_customCss.c_str(), _TRUNCATE);
-    g_ipc->cheatMenuEnabled = g_cheatMenuEnabled ? 1 : 0;
-    InterlockedIncrement(&g_ipc->tweaksSeq);
-}
-static void LoadTweaks() {
-    g_tweaksMask = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", 0);
-    g_customName = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName");
-    g_customCss = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss");
-    g_cheatMenuEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", 0) != 0;
-    PushTweaksToIPC();
-}
-static void SaveTweaks() {
-    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", g_tweaksMask);
-    PushTweaksToIPC();
-}
-static void SaveCheatMenuSetting(bool on) {
-    g_cheatMenuEnabled = on;
-    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", on ? 1 : 0);
-    PushTweaksToIPC();
-}
-static void SaveCustomName(const std::wstring& s) {
-    g_customName = s;
-    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName", g_customName);
-    PushTweaksToIPC();
-}
-static void SaveCustomCss(const std::wstring& s) {
-    g_customCss = s;
-    RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss", g_customCss);
-    PushTweaksToIPC();
-}
 
 // ── Position helper ───────────────────────────────────────
 static void GetCardPos(int& x, int& y) {
