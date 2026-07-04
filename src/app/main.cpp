@@ -431,6 +431,45 @@ static std::string ToUtf8(const std::wstring& w){
     std::string r(n,0);
     WideCharToMultiByte(CP_UTF8,0,w.c_str(),(int)w.size(),r.data(),n,nullptr,nullptr);
     return r;}
+static std::wstring FromUtf8(const std::string& s){
+    if(s.empty())return std::wstring();
+    int n=MultiByteToWideChar(CP_UTF8,0,s.c_str(),(int)s.size(),nullptr,0);
+    std::wstring r(n,0);
+    MultiByteToWideChar(CP_UTF8,0,s.c_str(),(int)s.size(),r.data(),n);
+    return r;}
+// Decodes one JSON string literal starting at s[i] (must be '"'), advancing
+// i past the closing quote — needed for the release "body" field (GitHub's
+// auto-generated changelog), which is real multi-line markdown text full
+// of \n/\"/\\ escapes, unlike tag_name/browser_download_url which are
+// simple enough for the existing find+substr approach elsewhere here.
+static std::string JsonDecodeStringAt(const std::string& s,size_t& i){
+    std::string out;
+    if(i>=s.size()||s[i]!='"')return out;
+    i++;
+    while(i<s.size()&&s[i]!='"'){
+        char c=s[i];
+        if(c=='\\'&&i+1<s.size()){
+            char n=s[i+1];
+            switch(n){
+            case '"':  out+='"';  i+=2;break;
+            case '\\': out+='\\'; i+=2;break;
+            case '/':  out+='/';  i+=2;break;
+            case 'n':  out+='\n'; i+=2;break;
+            case 'r':  out+='\r'; i+=2;break;
+            case 't':  out+='\t'; i+=2;break;
+            case 'u':
+                if(i+5<s.size()){
+                    int cp=(int)strtol(s.substr(i+2,4).c_str(),nullptr,16);
+                    if(cp<0x80)out+=(char)cp;
+                    else if(cp<0x800){out+=(char)(0xC0|(cp>>6));out+=(char)(0x80|(cp&0x3F));}
+                    else{out+=(char)(0xE0|(cp>>12));out+=(char)(0x80|((cp>>6)&0x3F));out+=(char)(0x80|(cp&0x3F));}
+                    i+=6;
+                }else i++;
+                break;
+            default: out+=n; i+=2;break;}
+        }else{out+=c;i++;}}
+    if(i<s.size())i++; // closing quote
+    return out;}
 
 // ── Discord Rich Presence ─────────────────────────────────
 // No SDK, just Discord's local RPC pipe protocol: connect to
@@ -849,8 +888,11 @@ static bool HttpsDownloadToFile(const std::wstring& url,const std::wstring& dest
 
 // Pulls tag_name + the YMHub.exe asset URL out of GitHub's "latest
 // release" JSON via plain substring search (consistent with the rest of
-// this codebase — no JSON library in use anywhere else either).
-static bool ParseLatestRelease(const std::string& json,std::wstring& tag,std::wstring& assetUrl){
+// this codebase — no JSON library in use anywhere else either). notes is
+// optional (nullptr skips it) — only the first-run changelog needs the
+// "body" field (GitHub's auto-generated release notes, see release.yml's
+// generate_release_notes: true), the update-check path never did.
+static bool ParseLatestRelease(const std::string& json,std::wstring& tag,std::wstring& assetUrl,std::wstring* notes=nullptr){
     auto tp=json.find("\"tag_name\"");
     if(tp==std::string::npos)return false;
     auto q1=json.find('"',tp+11);
@@ -858,6 +900,17 @@ static bool ParseLatestRelease(const std::string& json,std::wstring& tag,std::ws
     if(q1==std::string::npos||q2==std::string::npos)return false;
     std::string t=json.substr(q1+1,q2-q1-1);
     tag.assign(t.begin(),t.end());
+
+    if(notes){
+        auto bp=json.find("\"body\"");
+        if(bp!=std::string::npos){
+            auto bq=json.find('"',bp+6);
+            if(bq!=std::string::npos){
+                size_t i=bq;
+                *notes=FromUtf8(JsonDecodeStringAt(json,i));
+            }
+        }
+    }
 
     auto ap=json.find("\"YMHub.exe\"");
     if(ap==std::string::npos)return false;
@@ -976,6 +1029,64 @@ static void CheckForUpdate(bool manual=false){
 
     g_pendingUpdateUrl=assetUrl;g_pendingUpdateVer=latest;
     PostUpdateStatus(L"found",latest);}
+
+// Pulls each commit's subject line (first line of commit.message) out of
+// GitHub's compare-two-refs JSON, in the order returned (oldest first —
+// the order the work actually happened in). Tried the release's own
+// "body" field first (GitHub's generate_release_notes: true) but that's
+// built from merged PRs, and this repo pushes straight to main with none
+// — every release came back with nothing but a bare "Full Changelog:
+// <compare link>" line. The compare API's raw commit list is the actual
+// log regardless of PR usage, which is what was actually asked for.
+static bool ParseCompareCommits(const std::string& json,std::wstring& notesOut){
+    auto cp=json.find("\"commits\"");
+    if(cp==std::string::npos)return false;
+    std::vector<std::wstring> lines;
+    size_t i=cp;
+    for(;;){
+        auto mp=json.find("\"message\"",i);
+        if(mp==std::string::npos)break;
+        auto q1=json.find('"',mp+9);
+        if(q1==std::string::npos)break;
+        size_t at=q1;
+        std::string msg=JsonDecodeStringAt(json,at);
+        auto nl=msg.find('\n');
+        std::string subject=(nl==std::string::npos)?msg:msg.substr(0,nl);
+        if(!subject.empty())lines.push_back(L"• "+FromUtf8(subject));
+        i=at;
+    }
+    if(lines.empty())return false;
+    std::wstring out;
+    for(size_t k=0;k<lines.size();k++){if(k)out+=L"\n";out+=lines[k];}
+    notesOut=out;
+    return true;}
+
+static std::wstring g_changelogText,g_changelogVer;
+static void BroadcastChangelog(){
+    if(g_hubWv)g_hubWv->PostWebMessageAsString(
+        (L"{\"type\":\"changelog\",\"ver\":\""+JsonEsc(g_changelogVer)+
+         L"\",\"notes\":\""+JsonEsc(g_changelogText)+L"\"}").c_str());}
+
+// First launch of a version we haven't shown a changelog for yet. Needs a
+// baseline to diff from — a completely fresh install has nothing to
+// compare against, so that case just records the current version as seen
+// and stays quiet, rather than showing an empty or misleading changelog.
+static void CheckFirstRunChangelog(){
+    std::wstring seen=RegGetStr(HKEY_CURRENT_USER,REG_APP,L"LastSeenVersion");
+    if(seen==YMHUB_VERSION_W)return; // already shown for this exact build
+    if(seen.empty()){
+        RegSetStr(HKEY_CURRENT_USER,REG_APP,L"LastSeenVersion",YMHUB_VERSION_W);
+        return;}
+
+    std::string body;
+    std::wstring path=L"/repos/" YMHUB_REPO_W L"/compare/v"+seen+L"...v" YMHUB_VERSION_W;
+    if(!HttpsGet(L"api.github.com",path.c_str(),body))return;
+    std::wstring notes;
+    if(!ParseCompareCommits(body,notes))return;
+
+    g_changelogText=notes;g_changelogVer=YMHUB_VERSION_W;
+    RegSetStr(HKEY_CURRENT_USER,REG_APP,L"LastSeenVersion",YMHUB_VERSION_W);
+    if(g_hwnd)PostMessageW(g_hwnd,WM_APP+34,0,0);}
 
 // ── Media / commands ──────────────────────────────────────
 static void SendCmd(DWORD cmd){
@@ -1560,6 +1671,34 @@ html,body{width:100%;height:100%;overflow:hidden;
 .upd-btn2.go{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;}
 .upd-btn2.go:hover{filter:brightness(1.1);}
 .upd-btn2:disabled{opacity:.4;cursor:default;pointer-events:none;}
+
+/* ── First-run changelog modal — same shell language as #upd-scrim/
+   #upd-modal (blur scrim, dark card, same button styling) since this
+   should read as the same product, just wider and with a scrollable
+   body for the actual notes text instead of one line of sub text. ── */
+#chg-scrim{
+  position:fixed;inset:0;z-index:100;display:none;
+  align-items:center;justify-content:center;
+  background:rgba(8,8,14,.45);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  opacity:0;transition:opacity .25s ease;
+}
+#chg-scrim.show{display:flex;opacity:1;}
+#chg-modal{
+  width:380px;max-height:78vh;display:flex;flex-direction:column;
+  border-radius:20px;padding:22px 20px 18px;
+  background:#1d1b2a;border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 16px 48px rgba(0,0,0,.5);
+  transform:scale(.9) translateY(8px);transition:transform .25s ease;
+}
+#chg-scrim.show #chg-modal{transform:scale(1) translateY(0);}
+#chg-modal-title{font-size:15px;font-weight:600;margin-bottom:4px;color:rgba(255,255,255,.92);}
+#chg-modal-ver{font-size:12px;color:var(--ac);font-weight:600;margin-bottom:14px;}
+#chg-modal-body{
+  font-size:12.5px;line-height:1.65;color:rgba(255,255,255,.68);
+  overflow-y:auto;flex:1;margin-bottom:16px;padding-right:6px;
+}
+#chg-modal-body b{color:rgba(255,255,255,.9);}
+#chg-modal-actions{display:flex;justify-content:flex-end;}
 </style></head>
 <body>
 <div id='app'>
@@ -1817,6 +1956,17 @@ html,body{width:100%;height:100%;overflow:hidden;
     <div id='upd-modal-actions'>
       <button class='upd-btn2 ghost' id='upd-modal-later' onclick='dismissUpdate()'>Позже</button>
       <button class='upd-btn2 go' id='upd-modal-go' onclick='confirmUpdate()'>Обновить</button>
+    </div>
+  </div>
+</div>
+
+<div id='chg-scrim'>
+  <div id='chg-modal'>
+    <div id='chg-modal-title'>Что нового</div>
+    <div id='chg-modal-ver'></div>
+    <div id='chg-modal-body'></div>
+    <div id='chg-modal-actions'>
+      <button class='upd-btn2 go' onclick='dismissChangelog()'>Понятно</button>
     </div>
   </div>
 </div>
@@ -2132,6 +2282,28 @@ function dismissUpdate(){
   $('upd-scrim').classList.remove('show');
   $('upd-txt').textContent='Найдено обновление';$('upd-btn').disabled=false;
 }
+
+// GitHub's auto-generated notes are simple markdown ("## heading",
+// "* item", "**bold**", plain URLs) — not worth a real markdown parser
+// for this, but escaping first and only ever introducing the handful of
+// tags built here (never raw-inserting the source text) keeps this safe
+// regardless of what ends up in a commit message.
+function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function mdToHtml(md){
+  return escHtml(md)
+    .replace(/^### (.*)$/gm,'<b>$1</b>')
+    .replace(/^## (.*)$/gm,'<b>$1</b>')
+    .replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
+    .replace(/^\* /gm,'• ')
+    .replace(/\n\n+/g,'<br><br>')
+    .replace(/\n/g,'<br>');
+}
+function showChangelogModal(ver,notes){
+  $('chg-modal-ver').textContent='Версия '+ver;
+  $('chg-modal-body').innerHTML=mdToHtml(notes);
+  $('chg-scrim').classList.add('show');
+}
+function dismissChangelog(){$('chg-scrim').classList.remove('show');}
 function confirmUpdate(){
   $('upd-modal-go').disabled=true;$('upd-modal-go').textContent='Установка...';
   $('upd-modal-later').style.display='none';
@@ -2165,6 +2337,7 @@ window.chrome.webview.addEventListener('message',e=>{
       }
     }
     return;}
+  if(d.type==='changelog'){showChangelogModal(d.ver,d.notes);return;}
 });
 
 buildRows();
@@ -2449,6 +2622,10 @@ static LRESULT CALLBACK WndProc(HWND hw,UINT msg,WPARAM wp,LPARAM lp){
         TryInject();Sleep(500);BroadcastState();return 0;
     case WM_APP+33: // updater status from background thread → UI thread
         BroadcastUpdateStatus(g_updState.c_str(),g_updLatest);return 0;
+    case WM_APP+34: // first-run changelog ready → UI thread; open the hub
+        // so this is actually seen instead of silently posting to a
+        // WebView the user may not have opened at all this session.
+        OpenHub();BroadcastChangelog();return 0;
     case WM_APP+3:
         EnterCriticalSection(&g_artCS);
         if(g_artReady.load()){g_artB64=g_artPending;g_artPending.clear();g_artReady=false;}
@@ -2477,6 +2654,7 @@ int WINAPI wWinMain(HINSTANCE hInst,HINSTANCE,LPWSTR,int){
 
     std::thread([](){
         Sleep(4000); // let the app finish starting up first
+        CheckFirstRunChangelog(); // once per version, not on every check below
         for(;;){
             CheckForUpdate();
             Sleep(6*60*60*1000); // re-check every 6 hours
