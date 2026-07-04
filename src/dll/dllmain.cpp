@@ -1,6 +1,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <dwmapi.h>
+#include <wrl.h>
+#include <WebView2.h>
 #include <winhttp.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -13,6 +16,9 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "dwmapi.lib")
+
+using namespace Microsoft::WRL;
 
 #define YM_CDP_PORT 9876
 
@@ -1885,6 +1891,17 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     if (g_hMem)  { CloseHandle(g_hMem);   g_hMem = nullptr; }
     return 0;
 }
+
+// Phase 0 of the host->DLL migration (see plan) proved live that a
+// WebView2 controller can be created and rendered from a thread inside
+// this DLL after CreateRemoteThread+LoadLibrary injection into Yandex
+// Music's already-running process — confirmed via a throwaway popup
+// window with a ticking JS counter (77+ ticks across two separate fresh
+// injections), a correctly-parented msedgewebview2.exe subprocess tree,
+// and clean teardown with no orphaned processes when Yandex Music was
+// killed. That scratch code has been removed now that the question is
+// answered; src/dll/CMakeLists.txt keeps the WebView2 SDK linkage this
+// proved out, ready for the real overlay/hub window port (Фаза 4).
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
