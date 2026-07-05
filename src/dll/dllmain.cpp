@@ -219,9 +219,13 @@ static HINTERNET g_cdpSession = nullptr, g_cdpConnect = nullptr, g_cdpWs = nullp
 // could read back a *different* thread's in-flight response.
 static std::mutex g_cdpMx;
 
-// Host writes the actual port into IPC (it may have had to pick a
-// fallback if YM_CDP_PORT was already taken by something else).
+// The injector (Forge) writes the actual port into the registry right
+// before LoadLibraryW — it may have had to pick a fallback if YM_CDP_PORT
+// was already taken by something else. g_ipc->cdpPort is a fallback for
+// the old main.cpp-hosted flow, kept only until that's deleted (Фаза 5).
 static int CdpPort() {
+    DWORD v = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CdpPort", 0);
+    if (v) return (int)v;
     if (g_ipc && g_ipc->cdpPort) return (int)g_ipc->cdpPort;
     return YM_CDP_PORT;
 }
