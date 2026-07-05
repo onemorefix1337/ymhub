@@ -1,7 +1,15 @@
 #pragma once
 #include <Windows.h>
 
-#define YMH_SHMEM_NAME  L"YMHub_IPC_v2"
+// Named mutex only — "is the DLL already loaded into some process" is the
+// one thing that still needs to be checked from outside that process
+// (Forge, before deciding whether to inject). Everything else that used
+// to live in a YMHubIPC shared-memory struct here collapsed into either
+// plain process-local globals or registry values once host and DLL
+// became the same process (see ymhub's migration plan,
+// sprightly-twirling-salamander, "Реестр вместо IPC-структуры") — the
+// one registry value with no other home, CdpPort, is read directly via
+// RegGetDW in dllmain.cpp, not declared here.
 #define YMH_MUTEX_NAME  L"YMHub_Loaded_v1"
 
 enum : DWORD {
@@ -16,101 +24,14 @@ enum : DWORD {
     YMHC_OVL_TOGGLE  = 8,
 };
 
-// Hotkey mods encoding: 1=Ctrl, 2=Shift, 4=Alt  (same as g_keys in main.cpp)
+// Hotkey mods encoding: 1=Ctrl, 2=Shift, 4=Alt
 struct IPCKey {
     DWORD mods;
     DWORD vk;
 };
 
-struct YMHubIPC {
-    // Host -> DLL: explicit commands (hub/overlay button clicks)
-    volatile LONG  cmdSeq;      // host increments each new command
-    volatile DWORD command;     // YMHC_*
-    volatile LONG  ack;         // DLL increments after executing
-
-    // Host -> DLL: hotkey config
-    volatile LONG  keySeq;      // incremented whenever keys[] changes
-    IPCKey         keys[6];     // [0]=ovl-toggle [1]=prev [2]=next [3]=toggle [4]=like [5]=dislike
-    HWND           hostHwnd;    // host overlay HWND for DLL->host PostMessage
-
-    // Rebind state: host sets TRUE while rebind UI is open, DLL skips hotkeys
-    volatile BOOL  rebinding;
-
-    // Host -> DLL: which port YM's --remote-debugging-port was launched
-    // with (0 until the host has confirmed/opened it). DLL uses this for
-    // its CDP client instead of a hardcoded port, since the host may have
-    // had to fall back to a different port if the default was busy.
-    volatile DWORD cdpPort;
-
-    // Host -> DLL: "please send YM's default key for action ymSendIdx"
-    // (see YM_ACTION_* below). The host's own foreground-gated low-level
-    // keyboard hook (LLKeyProc/g_ymKeys in main.cpp) detects the user's
-    // remapped key and the suppression of a remapped-away default key —
-    // both of those work fine on real (non-injected) input. But actually
-    // *emitting* the translated key has to happen via the DLL's CDP
-    // connection using Input.dispatchKeyEvent, not host-side SendInput:
-    // Chromium/Electron only treats page-dispatched JS KeyboardEvents and
-    // SendInput-synthesized OS input as untrusted (confirmed empirically —
-    // neither toggled playback, while a real keypress and CDP's own
-    // Input.dispatchMouseEvent, already used for like/dislike, both work),
-    // whereas CDP's Input domain is explicitly trusted input as far as
-    // Chromium is concerned.
-    volatile LONG  ymSendSeq;
-    volatile DWORD ymSendIdx;
-
-    // Host -> DLL: UI declutter toggles ("Твики" hub tab) — bit i set means
-    // hide the element(s) matching kTweakSelectors[i] in dllmain.cpp. Pure
-    // CSS injection (display:none via a <style> tag), so it's reversible
-    // and doesn't touch YM's own state/behavior, just what's rendered.
-    volatile LONG  tweaksSeq;
-    volatile DWORD tweaksMask;
-
-    // Host -> DLL: replacement text for TWEAK_HIDE_NAME, set from the
-    // hub's text input next to that tweak's toggle. Empty string means
-    // the DLL substitutes its own default ("Скрыто") instead.
-    wchar_t customName[32];
-
-    // Host -> DLL: arbitrary user-written CSS from the "Свой CSS" box on
-    // the Твики tab, appended to kTweakRules' output in the same <style>
-    // tag (see CdpApplyTweaks in dllmain.cpp) — lets the user customize
-    // anything CSS can reach instead of waiting on a built-in toggle for it.
-    wchar_t customCss[4096];
-
-    // DLL -> host: real liked state of the current track, polled from YM's
-    // own DOM every ~2s (see CdpQueryLiked in dllmain.cpp) — covers likes
-    // made outside the hub's own optimistic toggle (YM's native UI,
-    // remapped hotkeys, or a track that was already liked on load).
-    volatile DWORD ymLiked;
-
-    // DLL -> host: public CDN URL (avatars.yandex.net/avatars.mds.yandex.net)
-    // of the currently playing track's cover, polled from the page every
-    // ~2s (see CdpQueryCoverUrl in dllmain.cpp). Fed to Discord Rich
-    // Presence as an external large_image — Discord's own backend fetches
-    // it directly, so this only ever needs to be a URL, never image bytes.
-    wchar_t coverUrl[512];
-
-    // DLL -> host: relay for actions originating from the in-page "cheat
-    // menu" overlay (Shift inside YM, see CdpInjectMenu in dllmain.cpp).
-    // The overlay's own buttons already act instantly through the DLL's
-    // existing CDP/ExecCmd path with no host involvement — this is only
-    // for the handful of things the host alone owns (registry persistence
-    // for tweaks/CSS, mainly) so the standalone hub window and the
-    // overlay never disagree on saved state. Mirrors command/cmdSeq above,
-    // just in the opposite direction; reqText reuses the exact same
-    // message strings the hub's own WebMessageReceived already handles
-    // (see HandleUiMessage in main.cpp) so there's only one parser.
-    volatile LONG reqSeq;
-    wchar_t       reqText[4160];
-
-    // Host -> DLL: opt-in switch for the in-page cheat menu itself (see
-    // the "Меню в Яндекс Музыке" card on the Плагины tab). Off by default
-    // — when off, CdpInjectMenu tears down its DOM/listeners instead of
-    // building them, so a disabled menu leaves nothing behind in the page.
-    volatile DWORD cheatMenuEnabled;
-};
-
-// Bit indices into YMHubIPC::tweaksMask — matches kTweakRules order in
-// dllmain.cpp and the row order in the hub's "Твики" tab.
+// Bit indices for the "Твики" tweak mask — matches kTweakRules order in
+// dllmain.cpp and kTweakLabels' order in the in-page menu.
 enum {
     TWEAK_AI_WORDS    = 0, // AI-комментарии о треке (искра под плеером)
     TWEAK_VIBE_ANIM   = 1, // Анимация фона плеера
@@ -124,8 +45,9 @@ enum {
     TWEAK_COUNT       = 9,
 };
 
-// Index order for YMHubIPC::ymSendIdx and the matching default-key table
-// in dllmain.cpp — mirrors YM's own "Горячие клавиши" list top to bottom.
+// Index order for the DLL's own YM-native-hotkey remap table
+// (g_ymKeys/YM_DEFAULT_VK in dllmain.cpp) — mirrors YM's own "Горячие
+// клавиши" list top to bottom.
 enum {
     YM_ACTION_TOGGLE   = 0,  // play/pause       — default K
     YM_ACTION_MUTE     = 1,  // mute/unmute      — default M

@@ -42,16 +42,21 @@ namespace wmc = winrt::Windows::Media::Control;
 // to read now-playing state / issue playback actions — see HttpBridgeThreadFn.
 #define YMHUB_BRIDGE_PORT 47990
 
-static HANDLE        g_hMem       = nullptr;
-static YMHubIPC*     g_ipc        = nullptr;
 static HANDLE        g_mutex      = nullptr;
 static volatile bool g_run        = false;
-static LONG          g_lastCmdSeq = 0;
+// DOM-polled state (CdpQueryLiked/CdpQueryCoverUrl, see CdpAnnounceThread/
+// LogBadgeThread below) — plain process-local now that there's no host on
+// the other end of what used to be an IPC round-trip (g_ipc->ymLiked/
+// coverUrl). Фаза 5's "реестр вместо IPC" cleanup.
+static bool          g_domLiked   = false;
+static std::wstring  g_domCoverUrl;
+// Host set this while the hub's rebind UI was open, so hotkey handlers
+// would skip live keys mid-rebind — no such UI exists yet post-migration,
+// stays as a plain local for when in-page rebinding lands.
+static bool          g_rebinding  = false;
 // Overlay window handle — created by UiThread (Фаза 4a). Declared this
 // early because ExecCmd (below) needs to PostMessageW to it.
 static HWND          g_hwnd       = nullptr;
-static LONG          g_lastYmSendSeq = 0;
-static LONG          g_lastTweaksSeq = 0;
 
 // Captured from DllMain's first parameter — needed for SetWindowsHookExW,
 // which wants the HINSTANCE of the module that actually contains the hook
@@ -92,50 +97,54 @@ static void RegSetStr(HKEY root, const wchar_t* k, const wchar_t* v, const std::
     RegCloseKey(hk);
 }
 
+// Forward-declarations — реально определены гораздо ниже, среди остальной
+// CDP-машинерии, но нужны здесь: Save*/LoadTweaks живут в начале файла
+// (рядом с остальными Load*/Save* конфига), а с уходом IPC-раунд-трипа
+// (см. ApplyTweaksNow ниже) они зовут их напрямую.
+static void CdpApplyTweaks(DWORD mask, const wchar_t* customCssW);
+static void CdpApplyNameHide(bool on, const wchar_t* customNameW);
+static void CdpApplyPassportNameHide(bool on, const wchar_t* customNameW);
+
 // Настройки твиков/своего CSS — раньше эти же значения реестра принадлежали
-// хосту; теперь читаются независимо здесь же, чтобы BroadcastState/
-// CdpApplyTweaks были верны даже без хоста вообще (Фаза 5 удаляет хост
-// насовсем). Save* по-прежнему увеличивают g_ipc->tweaksSeq — существующий
-// tweaksSeq-watch в WorkerThread уже применяет их через CdpApplyTweaks/
-// CdpApplyNameHide, второй путь применения не нужен.
+// хосту, а применялись через IPC-раунд-трип (записать в shared memory,
+// затем WorkerThread замечает смену tweaksSeq и применяет). Без хоста
+// обе стороны этого раунд-трипа всё равно оказались бы в одном процессе,
+// так что Save* теперь просто применяют изменения сразу.
 static DWORD        g_tweaksMask = 0;
 static std::wstring g_customName;
 static std::wstring g_customCss;
 static bool         g_cheatMenuEnabled = false;
-static void PushTweaksToIPC() {
-    if (!g_ipc) return;
-    g_ipc->tweaksMask = g_tweaksMask;
-    wcsncpy_s(g_ipc->customName, g_customName.c_str(), _TRUNCATE);
-    wcsncpy_s(g_ipc->customCss, g_customCss.c_str(), _TRUNCATE);
-    g_ipc->cheatMenuEnabled = g_cheatMenuEnabled ? 1 : 0;
-    InterlockedIncrement(&g_ipc->tweaksSeq);
+static void ApplyTweaksNow() {
+    CdpApplyTweaks(g_tweaksMask, g_customCss.c_str());
+    bool hideName = (g_tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0;
+    CdpApplyNameHide(hideName, g_customName.c_str());
+    CdpApplyPassportNameHide(hideName, g_customName.c_str());
 }
 static void LoadTweaks() {
     g_tweaksMask = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", 0);
     g_customName = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName");
     g_customCss = RegGetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss");
     g_cheatMenuEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CheatMenu", 0) != 0;
-    PushTweaksToIPC();
+    ApplyTweaksNow();
 }
 static void SaveTweaks() {
     RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", g_tweaksMask);
-    PushTweaksToIPC();
+    ApplyTweaksNow();
 }
 static void SaveCustomName(const std::wstring& s) {
     g_customName = s;
     RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomName", g_customName);
-    PushTweaksToIPC();
+    ApplyTweaksNow();
 }
 static void SaveCustomCss(const std::wstring& s) {
     g_customCss = s;
     RegSetStr(HKEY_CURRENT_USER, REG_APP, L"CustomCss", g_customCss);
-    PushTweaksToIPC();
+    ApplyTweaksNow();
 }
 
 // Hotkey thread state
 static HWND          g_hkWnd      = nullptr;
 static DWORD         g_hkTid      = 0;
-static LONG          g_lastKeySeq = -1;
 static bool          g_regIds[6]  = {};
 static HHOOK         g_hook       = nullptr;
 
@@ -221,13 +230,10 @@ static std::mutex g_cdpMx;
 
 // The injector (Forge) writes the actual port into the registry right
 // before LoadLibraryW — it may have had to pick a fallback if YM_CDP_PORT
-// was already taken by something else. g_ipc->cdpPort is a fallback for
-// the old main.cpp-hosted flow, kept only until that's deleted (Фаза 5).
+// was already taken by something else.
 static int CdpPort() {
     DWORD v = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"CdpPort", 0);
-    if (v) return (int)v;
-    if (g_ipc && g_ipc->cdpPort) return (int)g_ipc->cdpPort;
-    return YM_CDP_PORT;
+    return v ? (int)v : YM_CDP_PORT;
 }
 
 static std::string CdpUtf8(const wchar_t* w) {
@@ -1752,11 +1758,11 @@ static DWORD WINAPI HttpBridgeThreadFn(LPVOID) {
 // Always on — this in-page menu (Shift inside YM) is now the only
 // settings surface at all (no tray, no separate hub window), so it can't
 // be an opt-in feature gated behind a toggle that used to live in the
-// hub itself. See CdpInjectMenu/CdpRemoveMenu above for what it renders.
+// hub itself. See CdpInjectMenu above for what it renders.
 static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
     while (g_run) {
-        if (g_ipc && CdpEnsureConnected()) {
-            CdpInjectMenu(g_ipc->tweaksMask, g_ipc->customCss);
+        if (CdpEnsureConnected()) {
+            CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
             CdpQueueDrain();
         }
         Sleep(300);
@@ -1784,10 +1790,10 @@ static void RefreshHotkeys() {
             g_regIds[i] = false;
         }
     }
-    // Фаза 1: was g_ipc->keys[i], now reads the registry directly — the
-    // hub UI that actually edits these still lives host-side for now
-    // (Фаза 4), so g_ipc->keySeq is still what wakes this up (see
-    // WorkerThread), but the values themselves come from here, not IPC.
+    // Registry is the only source of truth for these now — no more IPC
+    // struct anywhere (Фаза 5). WM_REFRESHHK is what wakes this up, posted
+    // either from WorkerThread's own startup or from wherever ends up
+    // actually rebinding a key next (see plan — no such UI exists yet).
     LoadKeys();
     // Register configured keys
     for (int i = 0; i < 6; i++) {
@@ -1807,7 +1813,7 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_HOTKEY) {
         int id = (int)(short)LOWORD(wp);
         { char b[32]; sprintf_s(b, "WM_HOTKEY id=%d", id); LogMsg(b); }
-        if (id >= 0 && id < 6 && (!g_ipc || !g_ipc->rebinding)) {
+        if (id >= 0 && id < 6 && !g_rebinding) {
             static const DWORD cmds[6] = {
                 YMHC_OVL_TOGGLE, YMHC_PREV, YMHC_NEXT,
                 YMHC_TOGGLE, YMHC_LIKE, YMHC_DISLIKE
@@ -1835,8 +1841,7 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
 // host's FindYM() (which searched *other* processes' windows) — from
 // inside the DLL, "the YM window" is just "our own process's window".
 static LRESULT CALLBACK LLKeyProc(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) &&
-        !(g_ipc && g_ipc->rebinding)) {
+    if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && !g_rebinding) {
         auto* k = (KBDLLHOOKSTRUCT*)lp;
         bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool sh   = (GetAsyncKeyState(VK_SHIFT)   & 0x8000) != 0;
@@ -1955,19 +1960,12 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
     LogMsg("Player ready");
 
     CdpInitToastStep(4, 5, L"Применение сохранённых настроек");
-    if (g_ipc) {
-        CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
-        bool hideName = (g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0;
-        CdpApplyNameHide(hideName, g_ipc->customName);
-        CdpApplyPassportNameHide(hideName, g_ipc->customName);
-    }
+    ApplyTweaksNow();
     Sleep(STEP_MIN_MS);
 
     CdpInitToastStep(5, 5, L"Оптимизация интерфейса");
-    if (g_ipc) {
-        g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
-        wcsncpy_s(g_ipc->coverUrl, CdpQueryCoverUrl().c_str(), _TRUNCATE);
-    }
+    g_domLiked = CdpQueryLiked();
+    g_domCoverUrl = CdpQueryCoverUrl();
     Sleep(STEP_MIN_MS);
 
     CdpInitToastDone(true, L"Подключено");
@@ -1981,13 +1979,9 @@ static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
         if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
-            if (g_ipc) {
-                CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
-                CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
-                CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
-                g_ipc->ymLiked = CdpQueryLiked() ? 1 : 0;
-                wcsncpy_s(g_ipc->coverUrl, CdpQueryCoverUrl().c_str(), _TRUNCATE);
-            }
+            ApplyTweaksNow();
+            g_domLiked = CdpQueryLiked();
+            g_domCoverUrl = CdpQueryCoverUrl();
         }
         Sleep(2000);
     }
@@ -2147,11 +2141,11 @@ static void ParseYMWork() {
     // it ever drifts, and picks up likes made outside the hub entirely
     // (YM's own UI, remapped native hotkeys, or a track already liked on
     // load). Skipped right on a track change: CDP polls independently on
-    // its own ~2s cadence, so g_ipc->ymLiked can still hold the *previous*
+    // its own ~2s cadence, so g_domLiked can still hold the *previous*
     // track's state for up to that long — applying it here would flash
     // the old status before that poll catches up, instead of the correct
     // assume-unliked default set above.
-    if (g_ipc && !justChangedTrack)g_liked = (g_ipc->ymLiked != 0);
+    if (!justChangedTrack) g_liked = g_domLiked;
     g_parsing = false;
     if (hw)PostMessageW(hw, WM_APP + 27, 0, 0);
 }
@@ -2275,7 +2269,7 @@ static void DiscordTick() {
         if (g_discordWasSent) { DiscordClearActivity(); g_discordWasSent = false; g_discordLastTrack.clear(); g_discordLastCover.clear(); }
         return;
     }
-    std::wstring cover = g_ipc ? g_ipc->coverUrl : L"";
+    std::wstring cover = g_domCoverUrl;
     if (g_track == g_discordLastTrack && g_artist == g_discordLastArtist && cover == g_discordLastCover && g_discordWasSent)
         return; // nothing actually changed — don't spam SET_ACTIVITY
     if (g_track != g_discordLastTrack || g_artist != g_discordLastArtist)g_discordStart = time(nullptr);
@@ -2794,17 +2788,15 @@ static DWORD WINAPI UiThread(LPVOID) {
 }
 
 // ── Worker thread ───────────────────────────────────────────────
+// Used to also own an IPC shared-memory struct and poll it for commands
+// from the host — that host doesn't exist anymore (Фаза 5), and every
+// one of those commands now arrives through a direct call instead
+// (ExecCmd from hotkeys/HTTP-bridge/in-page menu, SaveKeys/SaveTweaks
+// calling straight into RefreshHotkeys/CdpApplyTweaks). What's left is
+// just: advertise the DLL's presence via the named mutex Forge checks
+// before deciding whether to inject, spin up every other subsystem's
+// thread, and do the hotkeys' one-time initial registration.
 static DWORD WINAPI WorkerThread(LPVOID) {
-    // Open or create shared memory
-    g_hMem = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, YMH_SHMEM_NAME);
-    if (!g_hMem)
-        g_hMem = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-            0, sizeof(YMHubIPC), YMH_SHMEM_NAME);
-    if (!g_hMem) return 1;
-    g_ipc = (YMHubIPC*)MapViewOfFile(g_hMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(YMHubIPC));
-    if (!g_ipc) { CloseHandle(g_hMem); g_hMem = nullptr; return 1; }
-
-    // Advertise DLL presence via named mutex
     g_mutex = CreateMutexW(nullptr, TRUE, YMH_MUTEX_NAME);
     LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
     InitializeCriticalSection(&g_artCS);
@@ -2816,51 +2808,13 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     CreateThread(nullptr, 0, TrackThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, DiscordThreadFn, nullptr, 0, nullptr);
 
-    g_lastCmdSeq = g_ipc->cmdSeq;
-    g_lastKeySeq = g_ipc->keySeq;
-    g_lastYmSendSeq = g_ipc->ymSendSeq;
-    g_lastTweaksSeq = g_ipc->tweaksSeq;
-
     // Wait for hotkey window to be ready (up to 2 s), then do initial registration
     for (int i = 0; i < 200 && !g_hkWnd && g_run; i++) Sleep(10);
     if (g_hkWnd) PostMessageW(g_hkWnd, WM_REFRESHHK, 0, 0);
 
-    while (g_run) {
-        // Handle explicit commands from hub/overlay
-        LONG seq = InterlockedCompareExchange(&g_ipc->cmdSeq, 0, 0);
-        if (seq != g_lastCmdSeq) {
-            g_lastCmdSeq = seq;
-            ExecCmd(g_ipc->command);
-            InterlockedIncrement(&g_ipc->ack);
-        }
-        // Handle hotkey config changes
-        LONG ks = InterlockedCompareExchange(&g_ipc->keySeq, 0, 0);
-        if (ks != g_lastKeySeq) {
-            g_lastKeySeq = ks;
-            if (g_hkWnd) PostMessageW(g_hkWnd, WM_REFRESHHK, 0, 0);
-        }
-        // Host's keyboard hook detected a remapped YM hotkey — emit the
-        // original default key via CDP (see CdpSendYmKey above).
-        LONG ys = InterlockedCompareExchange(&g_ipc->ymSendSeq, 0, 0);
-        if (ys != g_lastYmSendSeq) {
-            g_lastYmSendSeq = ys;
-            CdpSendYmKey(g_ipc->ymSendIdx);
-        }
-        // Tweak toggled in the hub — apply immediately rather than waiting
-        // for LogBadgeThread's next 2s tick.
-        LONG ts = InterlockedCompareExchange(&g_ipc->tweaksSeq, 0, 0);
-        if (ts != g_lastTweaksSeq) {
-            g_lastTweaksSeq = ts;
-            CdpApplyTweaks(g_ipc->tweaksMask, g_ipc->customCss);
-            CdpApplyNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
-            CdpApplyPassportNameHide((g_ipc->tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0, g_ipc->customName);
-        }
-        Sleep(15);
-    }
+    while (g_run) Sleep(200); // keep the mutex held for the DLL's lifetime
 
     if (g_mutex) { ReleaseMutex(g_mutex); CloseHandle(g_mutex); g_mutex = nullptr; }
-    if (g_ipc)   { UnmapViewOfFile(g_ipc); g_ipc = nullptr; }
-    if (g_hMem)  { CloseHandle(g_hMem);   g_hMem = nullptr; }
     return 0;
 }
 
