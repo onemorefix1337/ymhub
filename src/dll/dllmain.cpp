@@ -1288,6 +1288,54 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
     std::wstring js;
     js += L"(function(){"
         L"var ROOT=document.getElementById('ymhub-cheat');"
+        // Every CdpInjectMenu tick is a brand-new, independent
+        // Runtime.evaluate call -- nothing from a previous tick's execution
+        // persists except actual window.* properties. These three need to
+        // be callable both from the one-time DOM-building code below
+        // (inside if(!ROOT), runs only on the very first tick) *and* from
+        // the unconditional resync tail at the end (runs every tick) --
+        // declaring them inside if(!ROOT) instead left them undefined on
+        // every tick after the first, since a function declared inside a
+        // block doesn't survive past that block in strict-mode code
+        // (confirmed live: threw "ymhubComboText is not a function" from
+        // the resync tail once tested via the real generated script, not
+        // just reasoned about).
+        L"function ymhubVkLabel(vk){"
+        L"var m={8:'Backspace',9:'Tab',13:'Enter',27:'Esc',32:'Space',37:'\\u2190',38:'\\u2191',39:'\\u2192',40:'\\u2193',"
+        L"186:';',187:'+',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\\\',221:']',222:'\\''};"
+        L"if(m[vk])return m[vk];"
+        L"if(vk>=112&&vk<=123)return 'F'+(vk-111);"
+        L"if(vk>=48&&vk<=90)return String.fromCharCode(vk);"
+        L"return '#'+vk;}"
+        L"function ymhubComboText(mods,vk){if(!vk)return 'Не задано';"
+        L"var p=[];if(mods&1)p.push('Ctrl');if(mods&2)p.push('Shift');if(mods&4)p.push('Alt');"
+        L"p.push(ymhubVkLabel(vk));return p.join('+');}"
+        // Shared by both bind lists below (YMHub's own 6 + YM's native-
+        // hotkey remap table's 13) -- same capture/display logic either
+        // way, only the DOM ids, labels, message prefix and "what's the
+        // currently-effective combo" getter differ.
+        L"function ymhubBuildBinds(wrapId,labels,msgPrefix,getEffective){"
+        L"var wrap=document.getElementById(wrapId);"
+        L"labels.forEach(function(label,i){"
+        L"var row=document.createElement('div');row.className='yc-tw-row';"
+        L"var nm=document.createElement('div');nm.className='yc-tw-name';nm.textContent=label;"
+        L"var btn=document.createElement('button');btn.className='yc-bind-btn';btn.id=wrapId+'-'+i;"
+        L"row.appendChild(nm);row.appendChild(btn);wrap.appendChild(row);"
+        L"btn.onclick=function(){"
+        L"if(btn.classList.contains('rec'))return;"
+        L"btn.classList.add('rec');btn.textContent='Нажмите клавишу\\u2026';"
+        // Bare Ctrl/Shift/Alt keydowns arrive on their own before the real
+        // key -- only 16/17/18 (Shift/Ctrl/Alt) get ignored so the capture
+        // keeps waiting for an actual key instead of binding to "just Shift".
+        L"var onKey=function(e){"
+        L"e.preventDefault();e.stopPropagation();"
+        L"if(e.keyCode===16||e.keyCode===17||e.keyCode===18)return;"
+        L"document.removeEventListener('keydown',onKey,true);btn.classList.remove('rec');"
+        L"if(e.keyCode===27){var cur=getEffective(i);btn.textContent=ymhubComboText(cur.mods,cur.vk);return;}"
+        L"var mods=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0);"
+        L"btn.textContent=ymhubComboText(mods,e.keyCode);"
+        L"window.__ymhubQ.push(msgPrefix+i+':'+mods+':'+e.keyCode);};"
+        L"document.addEventListener('keydown',onKey,true);};});}"
         L"if(!ROOT){"
         L"var st=document.createElement('style');st.id='ymhub-cheat-style';"
         // Same design tokens as the standalone hub window (--ac/--ac2/
@@ -1502,6 +1550,8 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"</div>"
         L"<div class=\"yc-sec\" data-sec=\"binds\"><div class=\"yc-sectitle\">Бинды</div>"
         L"<div id=\"yc-binds\"></div>"
+        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Хоткеи Яндекс Музыки</div>"
+        L"<div id=\"yc-ymbinds\"></div>"
         L"</div>"
         L"<div class=\"yc-sec\" data-sec=\"pro\">"
         L"<div class=\"yc-sectitle\">Перемотка</div>"
@@ -1566,46 +1616,20 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"document.getElementById('yc-css').addEventListener('change',function(){"
         L"window.__ymhubQ.push('css:'+this.value);});"
         L"window.__ymhubQ=window.__ymhubQ||[];"
-        // vk here is a plain JS KeyboardEvent.keyCode -- on Windows this
-        // has always lined up 1:1 with the Win32 virtual-key code for the
-        // keys that matter here (letters, digits, F-keys, arrows, OEM
-        // punctuation), so it round-trips to RegisterHotKey's own vk
-        // without needing a JS<->VK translation table in both directions.
-        L"function ymhubVkLabel(vk){"
-        L"var m={8:'Backspace',9:'Tab',13:'Enter',27:'Esc',32:'Space',37:'\\u2190',38:'\\u2191',39:'\\u2192',40:'\\u2193',"
-        L"186:';',187:'+',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\\\',221:']',222:'\\''};"
-        L"if(m[vk])return m[vk];"
-        L"if(vk>=112&&vk<=123)return 'F'+(vk-111);"
-        L"if(vk>=48&&vk<=90)return String.fromCharCode(vk);"
-        L"return '#'+vk;}"
-        L"function ymhubComboText(mods,vk){if(!vk)return 'Не задано';"
-        L"var p=[];if(mods&1)p.push('Ctrl');if(mods&2)p.push('Shift');if(mods&4)p.push('Alt');"
-        L"p.push(ymhubVkLabel(vk));return p.join('+');}"
-        L"var bindWrap=document.getElementById('yc-binds');"
-        L"var bindLabels=['Показать/скрыть плеер','Предыдущий трек','Следующий трек',"
-        L"'Пауза/воспроизведение','Нравится','Не нравится'];"
-        L"bindLabels.forEach(function(label,i){"
-        L"var row=document.createElement('div');row.className='yc-tw-row';"
-        L"var nm=document.createElement('div');nm.className='yc-tw-name';nm.textContent=label;"
-        L"var btn=document.createElement('button');btn.className='yc-bind-btn';btn.id='yc-bind-'+i;"
-        L"row.appendChild(nm);row.appendChild(btn);bindWrap.appendChild(row);"
-        L"btn.onclick=function(){"
-        L"if(btn.classList.contains('rec'))return;"
-        L"btn.classList.add('rec');btn.textContent='Нажмите клавишу\\u2026';"
-        // Bare Ctrl/Shift/Alt keydowns arrive on their own before the real
-        // key -- only 16/17/18 (Shift/Ctrl/Alt) get ignored so the capture
-        // keeps waiting for an actual key instead of binding to "just Shift".
-        L"var onKey=function(e){"
-        L"e.preventDefault();e.stopPropagation();"
-        L"if(e.keyCode===16||e.keyCode===17||e.keyCode===18)return;"
-        L"document.removeEventListener('keydown',onKey,true);btn.classList.remove('rec');"
-        L"var cur=window.__ymhubKeys[i];"
-        L"if(e.keyCode===27){btn.textContent=ymhubComboText(cur.mods,cur.vk);return;}"
-        L"var mods=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0);"
-        L"window.__ymhubKeys[i]={mods:mods,vk:e.keyCode};"
-        L"btn.textContent=ymhubComboText(mods,e.keyCode);"
-        L"window.__ymhubQ.push('rebind:'+i+':'+mods+':'+e.keyCode);};"
-        L"document.addEventListener('keydown',onKey,true);};});"
+        L"ymhubBuildBinds('yc-binds',['Показать/скрыть плеер','Предыдущий трек','Следующий трек',"
+        L"'Пауза/воспроизведение','Нравится','Не нравится'],'rebind:',"
+        L"function(i){return window.__ymhubKeys[i];});"
+        // YM's own native hotkeys (see LLKeyProc/g_ymKeys) -- vk:0 means "no
+        // remap, YM's own default key still works untouched", so the
+        // effective combo shown here falls back to YM_DEFAULT_VK/mods:0
+        // rather than "Не задано" (that fallback text is only right for
+        // YMHub's own binds above, where vk:0 genuinely means nothing
+        // happens at all).
+        L"ymhubBuildBinds('yc-ymbinds',['Пауза/воспроизведение','Заглушить','Перемотка вперёд',"
+        L"'Перемотка назад','Громкость +','Громкость \\u2212','Нравится','Не нравится','Повтор',"
+        L"'Перемешать','Следующий трек','Предыдущий трек','Полный экран'],'ymrebind:',"
+        L"function(i){var k=window.__ymhubYmKeys[i];"
+        L"return k.vk?k:{mods:0,vk:window.__ymhubYmDefaults[i]};});"
         // Named, window-stored handlers (not anonymous inline closures)
         // so CdpRemoveMenu can actually remove them when the feature is
         // switched off instead of leaving a stray document-wide hook.
@@ -1747,9 +1771,13 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // Skips any button mid-capture ('rec') so a native-side refresh
         // landing while the user is actively pressing a new key can't
         // stomp the "Нажмите клавишу…" placeholder out from under them.
-        L"for(var bi=0;bi<6;bi++){var bb=document.getElementById('yc-bind-'+bi);"
+        L"for(var bi=0;bi<6;bi++){var bb=document.getElementById('yc-binds-'+bi);"
         L"if(bb&&!bb.classList.contains('rec')){var k=window.__ymhubKeys[bi];"
         L"bb.textContent=ymhubComboText(k.mods,k.vk);}}"
+        L"for(var yi=0;yi<13;yi++){var yb=document.getElementById('yc-ymbinds-'+yi);"
+        L"if(yb&&!yb.classList.contains('rec')){var yk=window.__ymhubYmKeys[yi];"
+        L"if(!yk.vk)yk={mods:0,vk:window.__ymhubYmDefaults[yi]};"
+        L"yb.textContent=ymhubComboText(yk.mods,yk.vk);}}"
         L"})()";
     std::string preamble =
         "window.__ymhubTwLabels=[";
@@ -1763,6 +1791,17 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
     for (int i = 0; i < 6; i++) {
         if (i) preamble += ",";
         preamble += "{\"mods\":" + std::to_string(g_keys[i].mods) + ",\"vk\":" + std::to_string(g_keys[i].vk) + "}";
+    }
+    preamble += "];";
+    preamble += "window.__ymhubYmKeys=[";
+    for (int i = 0; i < 13; i++) {
+        if (i) preamble += ",";
+        preamble += "{\"mods\":" + std::to_string(g_ymKeys[i].mods) + ",\"vk\":" + std::to_string(g_ymKeys[i].vk) + "}";
+    }
+    preamble += "];window.__ymhubYmDefaults=[";
+    for (int i = 0; i < 13; i++) {
+        if (i) preamble += ",";
+        preamble += std::to_string(YM_DEFAULT_VK[i]);
     }
     preamble += "];";
     CdpRunJs(preamble + CdpUtf8(js.c_str()));
@@ -1913,6 +1952,18 @@ static void DispatchCheatAction(const std::string& item) {
             g_keys[idx] = { (DWORD)mods, (DWORD)vk };
             RegSetDW(HKEY_CURRENT_USER, REG_APP, KEY_REG[idx], ((DWORD)mods << 16) | (DWORD)vk);
             if (g_hkWnd) PostMessageW(g_hkWnd, WM_REFRESHHK, 0, 0);
+        }
+        return;
+    }
+    // YM's own native-hotkey remap table (g_ymKeys, read live by LLKeyProc
+    // on every keypress) -- unlike g_keys above, this needs no
+    // RegisterHotKey/WM_REFRESHHK dance, just the in-memory array updated
+    // so the very next keypress already sees it.
+    if (item.rfind("ymrebind:", 0) == 0) {
+        int idx = 0, mods = 0, vk = 0;
+        if (sscanf_s(item.c_str() + 9, "%d:%d:%d", &idx, &mods, &vk) == 3 && idx >= 0 && idx < 13) {
+            g_ymKeys[idx] = { (DWORD)mods, (DWORD)vk };
+            RegSetDW(HKEY_CURRENT_USER, REG_APP, YMKEY_REG[idx], ((DWORD)mods << 16) | (DWORD)vk);
         }
         return;
     }
