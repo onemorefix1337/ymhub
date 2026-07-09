@@ -21,6 +21,9 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <wincodec.h>
 #include <shcore.h>
+#include <shlobj.h>
+#include <DbgHelp.h>
+#include <CommCtrl.h>
 #include "../shared/ipc.h"
 #include "../shared/version.h"
 
@@ -32,6 +35,11 @@
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(linker,"\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 using namespace Microsoft::WRL;
 namespace wmc = winrt::Windows::Media::Control;
@@ -211,6 +219,83 @@ static HWND FindRenderWidget() {
     return render ? render : main;
 }
 
+static void LogMsg(const std::string& s);
+
+// ── Minimize/restore transition watch ───────────────────────────
+// Polling IsIconic() alone (see CheatMenuThreadFn/LogBadgeThread) only
+// catches the *steady state* of already being minimized — it still races
+// the actual instant of the transition, in either direction, since a poll
+// can land right as the window is mid-flip. Confirmed live: minimize-only
+// and restore-after-minimize both still occasionally crashed with just
+// the IsIconic guard. A WH_CALLWNDPROC hook on the main window's own
+// thread sees WM_WINDOWPOSCHANGING/WM_SYSCOMMAND synchronously, before
+// Windows finishes processing them, and opens a short cooldown from that
+// instant — closing the gap a poll can't.
+static HHOOK g_transitionHook = nullptr;
+static volatile LONGLONG g_transitionCooldownUntil = 0; // GetTickCount64() deadline
+
+// Hook procedures run inside the kernel-to-user callback boundary
+// (win32u!NtUserMessageCall / KiUserCallbackDispatcherContinue) — an
+// exception that escapes here can't unwind across that boundary and
+// takes down the whole process with a generic "unhandled exception in
+// a user callback" termination. Earlier version called LogMsg() (string
+// building + file I/O) from here, which is exactly the kind of non-
+// trivial work hook procs must never do. Keep this to the one atomic
+// write, nothing else, ever.
+static LRESULT CALLBACK TransitionWatchProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        const CWPSTRUCT* cwp = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        if (cwp->message == WM_WINDOWPOSCHANGING || cwp->message == WM_SYSCOMMAND) {
+            InterlockedExchange64(&g_transitionCooldownUntil, (LONGLONG)GetTickCount64() + 2500);
+        }
+    }
+    return CallNextHookEx(g_transitionHook, nCode, wParam, lParam);
+}
+
+// Idempotent — cheap to call from every poll loop until the main window
+// (and therefore its owning thread) actually exists to hook.
+static void EnsureTransitionWatch() {
+    if (g_transitionHook) return;
+    HWND main = FindMainWnd();
+    if (!main) return;
+    DWORD tid = GetWindowThreadProcessId(main, nullptr);
+    if (!tid) return;
+    g_transitionHook = SetWindowsHookExW(WH_CALLWNDPROC, TransitionWatchProc, g_hInst, tid);
+    LogMsg(g_transitionHook
+        ? ("TransitionWatch installed on tid=" + std::to_string(tid))
+        : ("TransitionWatch FAILED, err=" + std::to_string(GetLastError())));
+}
+static bool InTransitionCooldown() {
+    return (LONGLONG)GetTickCount64() < g_transitionCooldownUntil;
+}
+// Minimize turned out not to be the only trigger — losing focus because
+// another app went exclusive-fullscreen crashes it too (reported live),
+// with no minimize/restore message involved at all. Being unfocused in
+// the *steady state* is completely normal for a background music player
+// (must not pause CDP for that — Discord/liked-status sync would just
+// stop working the moment the user alt-tabs away) — what's dangerous is
+// the *instant of change* itself, in either iconic-state or foreground-
+// window identity. Detect that edge directly by comparing against the
+// last poll, arm the same cooldown used for the message-hook case, and
+// only ever treat the steady "minimized" state (not "merely unfocused")
+// as unsafe on its own.
+static HWND g_lastForeground = nullptr;
+static bool g_lastIconic = false;
+static bool CdpUnsafeNow(HWND main) {
+    if (!main) return true;
+    bool iconic = IsIconic(main) != FALSE;
+    HWND fg = GetForegroundWindow();
+    if (iconic != g_lastIconic || fg != g_lastForeground) {
+        InterlockedExchange64(&g_transitionCooldownUntil, (LONGLONG)GetTickCount64() + 5000);
+    }
+    g_lastIconic = iconic;
+    g_lastForeground = fg;
+    return iconic || InTransitionCooldown();
+}
+// WaitUntilSafeForCdp() lives further down, right after CdpClose() is
+// declared — it needs to actively drop the CDP session while waiting,
+// not just poll IsIconic/cooldown.
+
 // ── Chrome DevTools Protocol client (background-safe like/dislike) ──
 // Chromium only treats WM_KEYDOWN as a real shortcut when the window
 // has actual OS focus, and UI Automation's accessibility tree is empty
@@ -244,10 +329,26 @@ static std::string CdpUtf8(const wchar_t* w) {
     return s;
 }
 
+// %TEMP% gets wiped by disk-cleanup tools and cycles per-session on some
+// setups — moved logs/dumps to a stable, dedicated folder so they're
+// still there whenever this gets looked at later, possibly long after
+// the crash that produced them.
+static std::wstring PersistentLogDir() {
+    wchar_t local[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local) != S_OK) {
+        wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+        return std::wstring(tmp) + L"YMHub";
+    }
+    return std::wstring(local) + L"\\YMHub";
+}
+static void EnsurePersistentLogDir() {
+    CreateDirectoryW(PersistentLogDir().c_str(), nullptr);
+}
+
 // ── In-memory log, surfaced as a row in YM's own Settings page (see
 // LogBadgeThread / CdpInjectSettingsLogRow) so the user can see what the
-// DLL is doing without attaching a debugger. Also mirrored to a file in %TEMP%
-// so logs survive across injections.
+// DLL is doing without attaching a debugger. Also mirrored to a file so
+// logs survive across injections and are there to look at after a crash.
 static std::mutex g_logMx;
 static std::vector<std::string> g_log;
 static void LogMsg(const std::string& s) {
@@ -259,8 +360,8 @@ static void LogMsg(const std::string& s) {
         g_log.push_back(line);
         if (g_log.size() > 300) g_log.erase(g_log.begin());
     }
-    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
-    std::wstring path = std::wstring(tmp) + L"YMHubDll.log";
+    EnsurePersistentLogDir();
+    std::wstring path = PersistentLogDir() + L"\\YMHubDll.log";
     HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return;
@@ -274,6 +375,128 @@ static std::string LogBlob() {
     std::string r;
     for (auto& l : g_log) { r += l; r += "\n"; }
     return r;
+}
+
+// ── Crash handler ────────────────────────────────────────────────
+// The minimize/focus-loss crash (see CdpUnsafeNow's own comment) hits
+// Windows' "unhandled exception during a user callback" fast-fail path
+// — confirmed live via System Informer's own "Во время обратного вызова
+// пользователя обнаружено необработанное исключение" message, which is
+// the exact wording for this specific failure mode. By default
+// (PROCESS_CALLBACK_FILTER_ENABLED) that path skips normal SEH
+// propagation entirely, so nothing in this process — including the
+// handler below — ever gets a chance to see the exception. Clearing the
+// flag is a documented Microsoft workaround (originally KB976038) that
+// restores ordinary exception propagation for this scenario, which is
+// what lets a real handler run instead of an instant, silent kill.
+static void DisableCallbackExceptionFiltering() {
+    typedef BOOL(WINAPI* GetPolicyFn)(LPDWORD);
+    typedef BOOL(WINAPI* SetPolicyFn)(DWORD);
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    if (!k32) return;
+    auto getPolicy = (GetPolicyFn)GetProcAddress(k32, "GetProcessUserModeExceptionPolicy");
+    auto setPolicy = (SetPolicyFn)GetProcAddress(k32, "SetProcessUserModeExceptionPolicy");
+    if (!getPolicy || !setPolicy) return;
+    DWORD flags = 0;
+    if (getPolicy(&flags)) {
+        const DWORD PROCESS_CALLBACK_FILTER_ENABLED = 0x1;
+        setPolicy(flags & ~PROCESS_CALLBACK_FILTER_ENABLED);
+    }
+}
+
+// This crash (see CdpUnsafeNow's own comment) is a *deliberate* int3/
+// CHECK-failure breakpoint inside Chromium's own code, not memory
+// corruption — confirmed via WinDbg on a dump this same handler wrote.
+// Chromium is intentionally aborting because it detected a broken
+// internal invariant; nothing here can make the process continue
+// afterward, only show what happened before it goes down. Modeled after
+// the reference screenshot the user provided (a Neverlose-style crash
+// dialog) — same shape, own wording, and no claim of auto-submitting a
+// report anywhere, since there's no server behind this to send it to.
+static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath, const std::wstring& logPath) {
+    wchar_t content[2048];
+    swprintf(content, 2048,
+        L"Обнаружена критическая внутренняя ошибка движка Яндекс Музыки, из-за которой приложение пришлось закрыть.\n\n"
+        L"Возможные причины:\n"
+        L"1. Внутренний сбой встроенного Chromium-движка Яндекс Музыки.\n"
+        L"2. Конфликт с другим ПО, работающим поверх Яндекс Музыки.\n"
+        L"3. Повреждённые файлы приложения.\n\n"
+        L"Рекомендуемые действия:\n"
+        L"1. Запустите Яндекс Музыку через Forge ещё раз.\n"
+        L"2. Если ошибка повторяется — приложите файлы лога и дампа ниже при обращении в поддержку.\n\n"
+        L"Техническая информация:\n"
+        L"Версия YMHub: %s\n"
+        L"Код ошибки: 0x%08X\n"
+        L"Адрес: 0x%p\n"
+        L"Лог: %s\n"
+        L"Дамп: %s",
+        YMHUB_VERSION_W, code, addr, logPath.c_str(), dumpPath.c_str());
+
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize = sizeof(cfg);
+    cfg.dwFlags = TDF_SIZE_TO_CONTENT;
+    cfg.pszWindowTitle = L"YMHub";
+    cfg.pszMainIcon = TD_ERROR_ICON;
+    cfg.pszMainInstruction = L"Яндекс Музыка неожиданно закрылась";
+    cfg.pszContent = content;
+    cfg.pszFooter = L"Лог и дамп сохранены только локально — никуда не отправляются автоматически.";
+    cfg.dwCommonButtons = TDCBF_OK_BUTTON;
+    cfg.nDefaultButton = IDOK;
+    TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
+}
+
+// Last-resort handler: writes a readable summary to the persistent log,
+// a full .dmp next to it (same shape WER already produces for these,
+// just guaranteed to be sitting right next to the readable log instead
+// of buried in %LOCALAPPDATA%\CrashDumps), shows the dialog above, then
+// exits deliberately — letting EXCEPTION_CONTINUE_SEARCH run afterward
+// would hand this same exception to WER too, stacking a second, generic
+// "Яндекс Музыка has stopped working" dialog on top of ours.
+static std::mutex g_crashMx;
+static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
+    std::lock_guard<std::mutex> lk(g_crashMx);
+    EnsurePersistentLogDir();
+    std::wstring dir = PersistentLogDir();
+
+    SYSTEMTIME t; GetLocalTime(&t);
+    wchar_t stamp[32];
+    swprintf(stamp, 32, L"%04d%02d%02d_%02d%02d%02d",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    void* addr = ep->ExceptionRecord->ExceptionAddress;
+    char buf[256];
+    sprintf_s(buf, "CRASH code=0x%08X addr=%p pid=%lu tid=%lu",
+        code, addr, GetCurrentProcessId(), GetCurrentThreadId());
+    LogMsg(buf);
+
+    std::wstring logPath = dir + L"\\YMHubDll.log";
+    std::wstring dumpPath = dir + L"\\crash_" + stamp + L".dmp";
+    HANDLE hFile = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool dumpOk = false;
+    if (hFile != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei{};
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = ep;
+        mei.ClientPointers = FALSE;
+        dumpOk = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+            (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithIndirectlyReferencedMemory |
+                MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules),
+            &mei, nullptr, nullptr) != FALSE;
+        CloseHandle(hFile);
+        LogMsg(dumpOk ? ("CRASH dump written: " + CdpUtf8(dumpPath.c_str()))
+                      : "CRASH MiniDumpWriteDump FAILED");
+    } else {
+        LogMsg("CRASH dump CreateFile FAILED");
+    }
+
+    ShowCrashDialog(code, addr, dumpOk ? dumpPath : L"(не удалось записать)", logPath);
+    ExitProcess((UINT)code);
+}
+static void InstallCrashHandler() {
+    DisableCallbackExceptionFiltering();
+    SetUnhandledExceptionFilter(CrashHandler);
 }
 
 // Escapes text for embedding inside a single-quoted JS string literal
@@ -366,6 +589,23 @@ static void CdpClose() {
     if (g_cdpWs) { WinHttpCloseHandle(g_cdpWs); g_cdpWs = nullptr; }
     if (g_cdpConnect) { WinHttpCloseHandle(g_cdpConnect); g_cdpConnect = nullptr; }
     if (g_cdpSession) { WinHttpCloseHandle(g_cdpSession); g_cdpSession = nullptr; }
+}
+
+// For one-shot CDP work (CdpAnnounceThread) where skipping isn't an
+// option the way it is for the polling loops — block briefly instead
+// until the window's not mid-transition, actively dropping any live
+// session while waiting rather than just declining to poll it.
+static void WaitUntilSafeForCdp() {
+    for (;;) {
+        HWND main = FindMainWnd();
+        if (!main || !CdpUnsafeNow(main)) return;
+        EnsureTransitionWatch();
+        {
+            std::lock_guard<std::mutex> lk(g_cdpMx);
+            CdpClose();
+        }
+        Sleep(100);
+    }
 }
 
 static bool CdpEnsureConnected() {
@@ -1400,7 +1640,30 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"rep.getAttribute('data-test-id')!=='REPEAT_BUTTON_NO_REPEAT');"
         L"}"
         L"window.__ymhubSyncPlaying=syncPlaying;"
-        L"window.__ymhubSyncTimer=setInterval(function(){syncPlaying();syncPro();},700);syncPlaying();syncPro();"
+        // This interval runs entirely inside the page's own JS engine, on
+        // its own event loop — completely outside anything the DLL's own
+        // native-side minimize/focus guards (CdpUnsafeNow) can see or
+        // pause. It kept running every 700ms regardless of what the
+        // native side did, which is exactly why those guards alone never
+        // fully closed the minimize/focus-loss crash: this was the other
+        // half. document.hidden is true exactly when a window minimizes
+        // or gets fully occluded (e.g. by another app's exclusive
+        // fullscreen) — skipping the actual DOM work on those ticks
+        // keeps the crash-prone code from ever running during exactly
+        // the moments that were racing it.
+        // A rapid, repeated back-and-forth (alt-tabbing fast, or minimize
+        // immediately followed by refocus) can still land a sync call
+        // right in the settling period after visibilitychange fires but
+        // before document.hidden has genuinely stabilized — confirmed
+        // live under randomized rapid-fire testing. The listener plus a
+        // short cooldown after *any* change closes that: not just "is it
+        // hidden right now" but "did it change recently at all."
+        L"var __ymhubHideAt=0;"
+        L"document.addEventListener('visibilitychange',function(){__ymhubHideAt=Date.now();});"
+        L"function __ymhubSyncSafe(){"
+        L"if(!document.hidden&&(Date.now()-__ymhubHideAt)>1500){syncPlaying();syncPro();}}"
+        L"window.__ymhubSyncTimer=setInterval(__ymhubSyncSafe,700);"
+        L"if(!document.hidden){syncPlaying();syncPro();}"
         L"}"
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
@@ -1761,11 +2024,39 @@ static DWORD WINAPI HttpBridgeThreadFn(LPVOID) {
 // hub itself. See CdpInjectMenu above for what it renders.
 static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
     while (g_run) {
-        if (CdpEnsureConnected()) {
+        // Minimizing/restoring, or just losing focus to another app going
+        // fullscreen, races CDP traffic against the transition and
+        // reliably crashes the whole host process (confirmed via crash-
+        // dump analysis + isolated repro, both triggers reported live).
+        // CdpUnsafeNow catches the change itself, not just steady-state
+        // iconic — see its own comment.
+        HWND main = FindMainWnd();
+        EnsureTransitionWatch();
+        bool danger = CdpUnsafeNow(main);
+        if (danger) {
+            // Pausing new polls wasn't enough — a *connected* CDP session
+            // itself, not just an in-flight call, appears to be what's
+            // fragile across a visibility transition (confirmed: even a
+            // single realistic minimize still crashed with polls paused).
+            // Fully drop the session so nothing about it is live across
+            // the transition; CdpEnsureConnected() below re-attaches once
+            // it's safe again.
+            std::lock_guard<std::mutex> lk(g_cdpMx);
+            CdpClose();
+        } else if (CdpEnsureConnected()) {
             CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
             CdpQueueDrain();
         }
-        Sleep(300);
+        // Was 300ms — that's roughly 3x/sec of CDP traffic hitting the
+        // renderer just to keep an already-injected menu current, which
+        // is what made the minimize race so easy to hit in practice. The
+        // menu doesn't need sub-second freshness; cutting the poll rate
+        // directly cuts how often a call can be in flight when a
+        // transition happens, which the guards above can't fully do
+        // alone (the actual danger window is the renderer's own JS
+        // execution time, not anything this thread's local timeout
+        // controls).
+        Sleep(1000);
     }
     return 0;
 }
@@ -1949,6 +2240,7 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
 
     CdpInitToastStep(3, 5, L"Проверка готовности плеера");
     stepStart = GetTickCount();
+    WaitUntilSafeForCdp();
     bool ready = CdpVerifyPlayerReady();
     elapsed = GetTickCount() - stepStart;
     if (elapsed < STEP_MIN_MS) Sleep(STEP_MIN_MS - elapsed);
@@ -1960,10 +2252,12 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
     LogMsg("Player ready");
 
     CdpInitToastStep(4, 5, L"Применение сохранённых настроек");
+    WaitUntilSafeForCdp();
     ApplyTweaksNow();
     Sleep(STEP_MIN_MS);
 
     CdpInitToastStep(5, 5, L"Оптимизация интерфейса");
+    WaitUntilSafeForCdp();
     g_domLiked = CdpQueryLiked();
     g_domCoverUrl = CdpQueryCoverUrl();
     Sleep(STEP_MIN_MS);
@@ -1977,7 +2271,16 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
 // visible even if the initial connect/verify sequence above failed.
 static DWORD WINAPI LogBadgeThread(LPVOID) {
     while (g_run) {
-        if (CdpEnsureConnected()) {
+        // Same transition guard as CheatMenuThreadFn above — this loop
+        // hits the same CDP path just on a slower cadence, so it's just
+        // as capable of racing a minimize or focus-loss transition.
+        HWND main = FindMainWnd();
+        EnsureTransitionWatch();
+        bool danger = CdpUnsafeNow(main);
+        if (danger) {
+            std::lock_guard<std::mutex> lk(g_cdpMx);
+            CdpClose();
+        } else if (CdpEnsureConnected()) {
             CdpInjectSettingsLogRow(LogBlob());
             ApplyTweaksNow();
             g_domLiked = CdpQueryLiked();
@@ -2621,15 +2924,31 @@ static void InitWebView() {
     // can't safely share one profile directory.
     wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
     std::wstring userDataFolder = std::wstring(tmp) + L"YMHubDll.WebView2";
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, userDataFolder.c_str(), nullptr,
+    // The completion handler below only ever runs if this call actually
+    // manages to *start* the async environment creation. If the WebView2
+    // Runtime isn't installed/reachable at all, this can fail synchronously
+    // instead (returns here without ever invoking the handler) -- silently,
+    // with neither "ready" nor "FAILED" ever reaching the log, and the
+    // already-shown native overlay window just sitting there empty forever.
+    // Confirmed missing in a real report: a log with WM_HOTKEY firing
+    // correctly for the overlay toggle but zero WebView2 log lines at all.
+    HRESULT hrStart = CreateCoreWebView2EnvironmentWithOptions(nullptr, userDataFolder.c_str(), nullptr,
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
-                if (!env) { LogMsg("WebView2 environment creation FAILED"); return S_OK; }
+            [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+                if (!env) {
+                    char b[80]; sprintf_s(b, "WebView2 environment creation FAILED: 0x%08lX", (unsigned long)hr);
+                    LogMsg(b);
+                    return S_OK;
+                }
                 g_env = env;
                 env->CreateCoreWebView2Controller(g_hwnd,
                     Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                        [](HRESULT, ICoreWebView2Controller* ctrl) -> HRESULT {
-                            if (!ctrl) { LogMsg("WebView2 controller creation FAILED"); return S_OK; }
+                        [](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+                            if (!ctrl) {
+                                char b[80]; sprintf_s(b, "WebView2 controller creation FAILED: 0x%08lX", (unsigned long)hr);
+                                LogMsg(b);
+                                return S_OK;
+                            }
                             g_ctrl = ctrl; ctrl->get_CoreWebView2(&g_wv);
                             SetupController(ctrl, g_wv.Get(), false);
                             g_wv->add_WebMessageReceived(
@@ -2665,6 +2984,10 @@ static void InitWebView() {
                         }).Get());
                 return S_OK;
             }).Get());
+    if (FAILED(hrStart)) {
+        char b[64]; sprintf_s(b, "CreateCoreWebView2EnvironmentWithOptions failed synchronously: 0x%08lX", (unsigned long)hrStart);
+        LogMsg(b);
+    }
 }
 
 static void ShowOverlay() {
@@ -2699,7 +3022,18 @@ static LRESULT CALLBACK OverlayWndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) 
     case WM_APP + 20: ShowOverlay(); return 0;
     case WM_APP + 27: BroadcastState(); return 0; // ParseYM worker finished
     case WM_APP + 21:
-        if (g_ctrl) g_ctrl->put_IsVisible(FALSE);
+        // Fully tear down the WebView2 controller here instead of just
+        // hiding it — this is a *second*, separate Chromium/Edge engine
+        // coexisting in the same process as YM's own, and confirmed live
+        // (via a proper control test disabling it entirely) to be the
+        // actual cause of the minimize/focus-loss crash, not the CDP-
+        // based in-page menu this was originally suspected to be. Tying
+        // its lifetime to "currently shown" instead of "ever shown once
+        // this session" keeps the exposure window to just that, rather
+        // than the whole rest of the process's life after first use.
+        if (g_ctrl) { g_ctrl->Close(); g_ctrl = nullptr; }
+        g_wv = nullptr;
+        g_wvInited = false;
         ShowWindow(hw, SW_HIDE);
         g_visible = false;
         BroadcastState();
@@ -2776,8 +3110,12 @@ static DWORD WINAPI UiThread(LPVOID) {
         DwmSetWindowAttribute(g_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cp, sizeof(cp));
     }
 
-    g_wvInited = true;
-    InitWebView();
+    // WebView2 is created lazily now, on first ShowOverlay() call (see
+    // its own comment, and WM_APP+21's) — not eagerly here. A second
+    // Chromium/Edge engine sitting in this process for the DLL's entire
+    // lifetime, whether or not the mini-player was ever opened, is
+    // exactly what a live control test pinned as the actual cause of
+    // the minimize/focus-loss crash.
 
     MSG m;
     while (g_run && GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -2797,10 +3135,15 @@ static DWORD WINAPI UiThread(LPVOID) {
 // before deciding whether to inject, spin up every other subsystem's
 // thread, and do the hotkeys' one-time initial registration.
 static DWORD WINAPI WorkerThread(LPVOID) {
+    InstallCrashHandler();
     g_mutex = CreateMutexW(nullptr, TRUE, YMH_MUTEX_NAME);
     LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
     InitializeCriticalSection(&g_artCS);
     LoadDiscordSetting();
+    // TEMP CONTROL TEST round 2: CDP threads back on, mini-player's own
+    // WebView2 (UiThread, disabled separately below) still off — isolating
+    // whether the mini-player alone is sufficient, without also needing
+    // CDP disabled, now that round 1 pointed at it instead of CDP.
     CreateThread(nullptr, 0, CdpAnnounceThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, LogBadgeThread, nullptr, 0, nullptr);
     CreateThread(nullptr, 0, CheatMenuThreadFn, nullptr, 0, nullptr);
