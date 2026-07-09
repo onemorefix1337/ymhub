@@ -1328,10 +1328,27 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-rail-spacer{flex:1;min-height:8px;}"
         L"#ymhub-cheat .yc-rail-lbl{font-size:8px;color:rgba(255,255,255,.3);"
         L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:3px;}"
+        // A plain "transition:background" between a flat rgba() and a
+        // linear-gradient() doesn't actually animate -- background-image
+        // isn't interpolable, so browsers just snap it instantly no matter
+        // what transition-duration says. Splitting the gradient into its
+        // own ::before layer that fades via opacity (which *does*
+        // interpolate) is what makes the on/off flip actually animate
+        // instead of only the knob sliding while the track color jumps.
         L"#ymhub-cheat .yc-rail-adv{width:26px;height:16px;border-radius:99px;flex-shrink:0;margin-bottom:6px;"
         L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);position:relative;cursor:pointer;"
-        L"transition:background .3s ease,border-color .3s ease;}"
-        L"#ymhub-cheat .yc-rail-adv.on{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
+        L"overflow:hidden;transition:border-color .3s ease;}"
+        // This whole CSS blob is itself one big JS single-quoted string
+        // (st.textContent='...') -- an unescaped '' for the CSS content
+        // property terminates that JS string right there instead of
+        // producing an empty CSS string, corrupting everything after it
+        // into raw (invalid) JS. Confirmed live: broke CdpInjectMenu's
+        // entire script, not just this rule -- #ymhub-cheat never
+        // appeared at all as a result, menu included.
+        L"#ymhub-cheat .yc-rail-adv::before{content:\\'\\';position:absolute;inset:0;border-radius:inherit;"
+        L"background:linear-gradient(135deg,#5b8fff,#7c6fff);opacity:0;transition:opacity .3s ease;}"
+        L"#ymhub-cheat .yc-rail-adv.on{border-color:transparent;}"
+        L"#ymhub-cheat .yc-rail-adv.on::before{opacity:1;}"
         L"#ymhub-cheat .yc-rail-adv .yc-knob{width:10px;height:10px;top:2px;left:2px;}"
         L"#ymhub-cheat .yc-rail-adv.on .yc-knob{left:14px;}"
         L"#ymhub-cheat .yc-pane{flex:1;min-width:0;}"
@@ -1384,14 +1401,23 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"border-bottom:1px solid rgba(255,255,255,.08);}"
         L"#ymhub-cheat .yc-tw-row:last-child{border-bottom:none;}"
         L"#ymhub-cheat .yc-tw-name{flex:1;font-size:12px;}"
+        // Same gradient-can't-transition issue as .yc-rail-adv above --
+        // ::before fades in via opacity instead of snapping.
         L"#ymhub-cheat .yc-tw-switch{position:relative;width:32px;height:19px;flex-shrink:0;border-radius:99px;"
         L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);cursor:pointer;"
-        L"transition:background .35s ease,border-color .35s ease;}"
-        L"#ymhub-cheat .yc-tw-switch.on,#ymhub-cheat .yc-rail-adv.on"
-        L"{background:linear-gradient(135deg,#5b8fff,#7c6fff);border-color:transparent;}"
-        L"#ymhub-cheat .yc-knob{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;"
+        L"overflow:hidden;transition:border-color .35s ease;}"
+        L"#ymhub-cheat .yc-tw-switch::before{content:\\'\\';position:absolute;inset:0;border-radius:inherit;"
+        L"background:linear-gradient(135deg,#5b8fff,#7c6fff);opacity:0;transition:opacity .35s ease;}"
+        L"#ymhub-cheat .yc-tw-switch.on{border-color:transparent;}"
+        L"#ymhub-cheat .yc-tw-switch.on::before{opacity:1;}"
+        L"#ymhub-cheat .yc-knob{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;z-index:1;"
         L"background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:left .35s cubic-bezier(.34,1.56,.64,1);}"
         L"#ymhub-cheat .yc-tw-switch.on .yc-knob{left:17px;}"
+        L"#ymhub-cheat .yc-bind-btn{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);"
+        L"color:rgba(255,255,255,.75);border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;"
+        L"font-family:inherit;white-space:nowrap;transition:background .15s,border-color .15s,color .15s;}"
+        L"#ymhub-cheat .yc-bind-btn:hover{background:rgba(255,255,255,.12);color:#fff;}"
+        L"#ymhub-cheat .yc-bind-btn.rec{background:rgba(91,143,255,.18);border-color:#5b8fff;color:#5b8fff;}"
         // .yc-cc/.yc-css mirror the hub's .cc-wrap/.cc-area.
         L"#ymhub-cheat .yc-cc{margin-top:14px;padding:12px;border-radius:12px;"
         L"background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);}"
@@ -1438,6 +1464,12 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"<line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/>"
         L"<circle cx=\"4\" cy=\"12\" r=\"2\" fill=\"currentColor\"/><circle cx=\"12\" cy=\"10\" r=\"2\" fill=\"currentColor\"/>"
         L"<circle cx=\"20\" cy=\"14\" r=\"2\" fill=\"currentColor\"/></svg></div>"
+        L"<div class=\"yc-rail-item\" id=\"yc-rail-binds\" data-sec=\"binds\" title=\"Бинды\">"
+        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+        L"<rect x=\"2\" y=\"5\" width=\"20\" height=\"14\" rx=\"2\"/>"
+        L"<circle cx=\"6.5\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/><circle cx=\"11\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/>"
+        L"<circle cx=\"15.5\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/>"
+        L"<line x1=\"7\" y1=\"14.5\" x2=\"15\" y2=\"14.5\"/></svg></div>"
         L"<div class=\"yc-rail-item\" id=\"yc-rail-pro\" data-sec=\"pro\" title=\"YM Pro\" style=\"display:none\">⚡</div>"
         L"<div class=\"yc-rail-spacer\"></div>"
         L"<div class=\"yc-rail-lbl\">ADV</div>"
@@ -1467,6 +1499,9 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"<div id=\"yc-tweaks\"></div>"
         L"<div class=\"yc-cc\"><div class=\"yc-cc-title\">Свой CSS</div>"
         L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\" placeholder=\".selector{ ... }\"></textarea></div>"
+        L"</div>"
+        L"<div class=\"yc-sec\" data-sec=\"binds\"><div class=\"yc-sectitle\">Бинды</div>"
+        L"<div id=\"yc-binds\"></div>"
         L"</div>"
         L"<div class=\"yc-sec\" data-sec=\"pro\">"
         L"<div class=\"yc-sectitle\">Перемотка</div>"
@@ -1531,6 +1566,46 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"document.getElementById('yc-css').addEventListener('change',function(){"
         L"window.__ymhubQ.push('css:'+this.value);});"
         L"window.__ymhubQ=window.__ymhubQ||[];"
+        // vk here is a plain JS KeyboardEvent.keyCode -- on Windows this
+        // has always lined up 1:1 with the Win32 virtual-key code for the
+        // keys that matter here (letters, digits, F-keys, arrows, OEM
+        // punctuation), so it round-trips to RegisterHotKey's own vk
+        // without needing a JS<->VK translation table in both directions.
+        L"function ymhubVkLabel(vk){"
+        L"var m={8:'Backspace',9:'Tab',13:'Enter',27:'Esc',32:'Space',37:'\\u2190',38:'\\u2191',39:'\\u2192',40:'\\u2193',"
+        L"186:';',187:'+',188:',',189:'-',190:'.',191:'/',192:'`',219:'[',220:'\\\\',221:']',222:'\\''};"
+        L"if(m[vk])return m[vk];"
+        L"if(vk>=112&&vk<=123)return 'F'+(vk-111);"
+        L"if(vk>=48&&vk<=90)return String.fromCharCode(vk);"
+        L"return '#'+vk;}"
+        L"function ymhubComboText(mods,vk){if(!vk)return 'Не задано';"
+        L"var p=[];if(mods&1)p.push('Ctrl');if(mods&2)p.push('Shift');if(mods&4)p.push('Alt');"
+        L"p.push(ymhubVkLabel(vk));return p.join('+');}"
+        L"var bindWrap=document.getElementById('yc-binds');"
+        L"var bindLabels=['Показать/скрыть плеер','Предыдущий трек','Следующий трек',"
+        L"'Пауза/воспроизведение','Нравится','Не нравится'];"
+        L"bindLabels.forEach(function(label,i){"
+        L"var row=document.createElement('div');row.className='yc-tw-row';"
+        L"var nm=document.createElement('div');nm.className='yc-tw-name';nm.textContent=label;"
+        L"var btn=document.createElement('button');btn.className='yc-bind-btn';btn.id='yc-bind-'+i;"
+        L"row.appendChild(nm);row.appendChild(btn);bindWrap.appendChild(row);"
+        L"btn.onclick=function(){"
+        L"if(btn.classList.contains('rec'))return;"
+        L"btn.classList.add('rec');btn.textContent='Нажмите клавишу\\u2026';"
+        // Bare Ctrl/Shift/Alt keydowns arrive on their own before the real
+        // key -- only 16/17/18 (Shift/Ctrl/Alt) get ignored so the capture
+        // keeps waiting for an actual key instead of binding to "just Shift".
+        L"var onKey=function(e){"
+        L"e.preventDefault();e.stopPropagation();"
+        L"if(e.keyCode===16||e.keyCode===17||e.keyCode===18)return;"
+        L"document.removeEventListener('keydown',onKey,true);btn.classList.remove('rec');"
+        L"var cur=window.__ymhubKeys[i];"
+        L"if(e.keyCode===27){btn.textContent=ymhubComboText(cur.mods,cur.vk);return;}"
+        L"var mods=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0);"
+        L"window.__ymhubKeys[i]={mods:mods,vk:e.keyCode};"
+        L"btn.textContent=ymhubComboText(mods,e.keyCode);"
+        L"window.__ymhubQ.push('rebind:'+i+':'+mods+':'+e.keyCode);};"
+        L"document.addEventListener('keydown',onKey,true);};});"
         // Named, window-stored handlers (not anonymous inline closures)
         // so CdpRemoveMenu can actually remove them when the feature is
         // switched off instead of leaving a stray document-wide hook.
@@ -1669,6 +1744,12 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
         L"for(var i=0;i<9;i++){var sw=document.getElementById('yc-tw-'+i);"
         L"if(sw)sw.classList.toggle('on',!!(window.__ymhubMask&(1<<i)));}"
+        // Skips any button mid-capture ('rec') so a native-side refresh
+        // landing while the user is actively pressing a new key can't
+        // stomp the "Нажмите клавишу…" placeholder out from under them.
+        L"for(var bi=0;bi<6;bi++){var bb=document.getElementById('yc-bind-'+bi);"
+        L"if(bb&&!bb.classList.contains('rec')){var k=window.__ymhubKeys[bi];"
+        L"bb.textContent=ymhubComboText(k.mods,k.vk);}}"
         L"})()";
     std::string preamble =
         "window.__ymhubTwLabels=[";
@@ -1678,6 +1759,12 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
     }
     preamble += "];window.__ymhubMask=" + std::to_string(mask) + ";"
         "window.__ymhubCss=\"" + CdpJsonEscape(CdpUtf8(customCssW ? customCssW : L"")) + "\";";
+    preamble += "window.__ymhubKeys=[";
+    for (int i = 0; i < 6; i++) {
+        if (i) preamble += ",";
+        preamble += "{\"mods\":" + std::to_string(g_keys[i].mods) + ",\"vk\":" + std::to_string(g_keys[i].vk) + "}";
+    }
+    preamble += "];";
     CdpRunJs(preamble + CdpUtf8(js.c_str()));
 }
 
@@ -1811,6 +1898,22 @@ static void DispatchCheatAction(const std::string& item) {
         std::wstring cssW(wlen, 0);
         if (wlen > 0) MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), cssW.data(), wlen);
         SaveCustomCss(cssW);
+        return;
+    }
+    // "rebind:<idx>:<mods>:<vk>" from the in-page binds capture UI --
+    // written straight to the same Key0..Key5 registry values LoadKeys()
+    // already reads, then RefreshHotkeys() (on HotkeyThread, via
+    // WM_REFRESHHK -- it's the thread that owns g_hkWnd/the actual
+    // RegisterHotKey calls) picks it up. g_keys itself gets updated too so
+    // the very next CdpInjectMenu tick's preamble reflects it immediately
+    // instead of only after RefreshHotkeys() re-runs LoadKeys().
+    if (item.rfind("rebind:", 0) == 0) {
+        int idx = 0, mods = 0, vk = 0;
+        if (sscanf_s(item.c_str() + 7, "%d:%d:%d", &idx, &mods, &vk) == 3 && idx >= 0 && idx < 6) {
+            g_keys[idx] = { (DWORD)mods, (DWORD)vk };
+            RegSetDW(HKEY_CURRENT_USER, REG_APP, KEY_REG[idx], ((DWORD)mods << 16) | (DWORD)vk);
+            if (g_hkWnd) PostMessageW(g_hkWnd, WM_REFRESHHK, 0, 0);
+        }
         return;
     }
 }
