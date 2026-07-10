@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <memory>
 #include <ctime>
 #include <cstdlib>
 #include <cstdio>
@@ -406,30 +407,45 @@ static void DisableCallbackExceptionFiltering() {
 
 static const wchar_t* TRASHEE_API_HOST = L"api.trashee.ru";
 static const wchar_t* TRASHEE_API_KEY =
-    L"bbac088ad1d1557d5f34b393746ba4af92056c643548c77681c1d898fb80f2e9";
+    L"0ba39f5595aebb0d9765563cd0edf6cc2d3dd778a2e828a83dd5338695c04f31";
 
 // Best-effort, tightly time-bounded upload of the crash report to the
-// developer's own collector. Runs inline on the crashed thread (not a
-// background thread) *deliberately* -- CrashHandler calls ExitProcess()
-// right after ShowCrashDialog(), which kills every thread immediately, so
-// a fire-and-forget background send would just as often lose the race and
-// never actually leave the process. The WinHttpSetTimeouts call below is
-// what keeps this from turning "server unreachable" into "crash dialog
-// never appears" -- every stage is bounded, and any failure (offline, DNS,
-// server down) is swallowed silently; the .log/.dmp already written to
-// disk is the fallback regardless of whether this succeeds.
-static bool SubmitCrashReport(const std::string& logBlob, DWORD code, void* addr,
-                               const std::wstring& dumpPath, bool dumpOk) {
+// developer's own collector. Every WinHTTP stage below is bounded via
+// WinHttpSetTimeouts so a hung/unreachable server can't turn into an
+// indefinite stall; any failure (offline, DNS, server down, timeout) is
+// swallowed silently here -- the .log/.dmp already written to disk is the
+// fallback regardless of whether this succeeds. Called from
+// CrashReportThreadFn on its own thread, never inline on the crashed
+// thread -- see that function's own comment for why.
+static bool SubmitCrashReportNow(const std::string& logBlob, DWORD code, void* addr,
+                                  const std::wstring& dumpPath, bool dumpOk) {
     bool ok = false;
     HINTERNET hSession = WinHttpOpen(L"YMHubCrashReporter", WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return false;
-    WinHttpSetTimeouts(hSession, 3000, 3000, 5000, 8000);
+    if (!hSession) {
+        char b[64]; sprintf_s(b, "trashee: WinHttpOpen FAILED err=%lu", GetLastError());
+        LogMsg(b);
+        return false;
+    }
+    // Real dumps here run 5-7MB (MiniDumpWithIndirectlyReferencedMemory is
+    // the big contributor) -- confirmed live that the original 5s/8s
+    // send/receive pair was too tight for that over a normal home upload
+    // link, failing with ERROR_WINHTTP_TIMEOUT (12002) even though the
+    // exact same request with no dump attached succeeded comfortably.
+    WinHttpSetTimeouts(hSession, 5000, 5000, 30000, 20000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, TRASHEE_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) {
+        char b[64]; sprintf_s(b, "trashee: WinHttpConnect FAILED err=%lu", GetLastError());
+        LogMsg(b);
+    }
     if (hConnect) {
         HINTERNET hReq = WinHttpOpenRequest(hConnect, L"POST", L"/crash", nullptr,
             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!hReq) {
+            char b[64]; sprintf_s(b, "trashee: WinHttpOpenRequest FAILED err=%lu", GetLastError());
+            LogMsg(b);
+        }
         if (hReq) {
             const std::string boundary = "----YMHubCrashBoundary7MA4YWxkTrZu0gW";
             std::string body;
@@ -478,13 +494,25 @@ static bool SubmitCrashReport(const std::string& logBlob, DWORD code, void* addr
             std::wstring headers = L"Content-Type: multipart/form-data; boundary=" + boundaryW +
                 L"\r\nX-Api-Key: " + std::wstring(TRASHEE_API_KEY) + L"\r\n";
 
-            if (WinHttpSendRequest(hReq, headers.c_str(), (DWORD)-1,
-                    (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) &&
-                WinHttpReceiveResponse(hReq, nullptr)) {
-                DWORD status = 0, statusSz = sizeof(status);
-                WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz, WINHTTP_NO_HEADER_INDEX);
-                ok = (status >= 200 && status < 300);
+            BOOL sentOk = WinHttpSendRequest(hReq, headers.c_str(), (DWORD)-1,
+                (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0);
+            if (!sentOk) {
+                char b[64]; sprintf_s(b, "trashee: WinHttpSendRequest FAILED err=%lu", GetLastError());
+                LogMsg(b);
+            }
+            if (sentOk) {
+                BOOL recvOk = WinHttpReceiveResponse(hReq, nullptr);
+                if (!recvOk) {
+                    char b[64]; sprintf_s(b, "trashee: WinHttpReceiveResponse FAILED err=%lu", GetLastError());
+                    LogMsg(b);
+                } else {
+                    DWORD status = 0, statusSz = sizeof(status);
+                    WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz, WINHTTP_NO_HEADER_INDEX);
+                    ok = (status >= 200 && status < 300);
+                    char b[48]; sprintf_s(b, "trashee: HTTP status=%lu", status);
+                    LogMsg(b);
+                }
             }
             WinHttpCloseHandle(hReq);
         }
@@ -492,6 +520,33 @@ static bool SubmitCrashReport(const std::string& logBlob, DWORD code, void* addr
     }
     WinHttpCloseHandle(hSession);
     return ok;
+}
+
+// Heap-allocated (not stack) since it has to outlive CrashHandler's own
+// stack frame -- the thread reading it runs concurrently with
+// ShowCrashDialog()/ExitProcess() below, not nested inside this call.
+struct CrashReportJob {
+    std::string logBlob;
+    DWORD code;
+    void* addr;
+    std::wstring dumpPath;
+    bool dumpOk;
+};
+
+// Runs the actual upload on its own thread rather than inline on the
+// crashed thread. CrashHandler calls ExitProcess() shortly after spawning
+// this, which kills every thread at once -- so this alone wouldn't
+// guarantee delivery either, except CrashHandler shows the (blocking,
+// waits-for-a-click) crash dialog *before* that ExitProcess, and only
+// waits a further few seconds on this thread afterward. In practice that
+// gives the upload the whole time the user spends looking at the dialog,
+// while the dialog itself appears immediately instead of waiting on the
+// network first.
+static DWORD WINAPI CrashReportThreadFn(LPVOID param) {
+    std::unique_ptr<CrashReportJob> job(static_cast<CrashReportJob*>(param));
+    bool ok = SubmitCrashReportNow(job->logBlob, job->code, job->addr, job->dumpPath, job->dumpOk);
+    LogMsg(ok ? "CRASH report sent to trashee" : "CRASH report send FAILED");
+    return 0;
 }
 
 // This crash (see CdpUnsafeNow's own comment) is a *deliberate* int3/
@@ -503,7 +558,7 @@ static bool SubmitCrashReport(const std::string& logBlob, DWORD code, void* addr
 // the reference screenshot the user provided (a Neverlose-style crash
 // dialog) — same shape, own wording.
 static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath,
-                             const std::wstring& logPath, bool reportSent) {
+                             const std::wstring& logPath, bool reportAttempted) {
     wchar_t content[2048];
     swprintf(content, 2048,
         L"Обнаружена критическая внутренняя ошибка движка Яндекс Музыки, из-за которой приложение пришлось закрыть.\n\n"
@@ -529,9 +584,13 @@ static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath
     cfg.pszMainIcon = TD_ERROR_ICON;
     cfg.pszMainInstruction = L"Яндекс Музыка неожиданно закрылась";
     cfg.pszContent = content;
-    cfg.pszFooter = reportSent
-        ? L"Лог и дамп сохранены локально и отправлены разработчику."
-        : L"Лог и дамп сохранены локально. Отправить отчёт разработчику не удалось (нет сети?).";
+    // Upload runs on a background thread (see CrashReportThreadFn) so this
+    // dialog never waits on the network to appear -- the exact send outcome
+    // isn't known yet at this point, only whether an attempt is being made
+    // at all (it's skipped when throttled, see CrashHandler).
+    cfg.pszFooter = reportAttempted
+        ? L"Лог и дамп сохранены локально, отчёт отправляется разработчику."
+        : L"Лог и дамп сохранены локально. Отчёт не отправлен повторно — слишком много крашей подряд.";
     cfg.dwCommonButtons = TDCBF_OK_BUTTON;
     cfg.nDefaultButton = IDOK;
     TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
@@ -583,10 +642,41 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
         LogMsg("CRASH dump CreateFile FAILED");
     }
 
-    bool reportSent = SubmitCrashReport(LogBlob(), code, addr, dumpPath, dumpOk);
-    LogMsg(reportSent ? "CRASH report sent to trashee" : "CRASH report send FAILED");
+    // A crash loop (broken update, bad install, whatever) would otherwise
+    // hammer the server once per relaunch -- cap real send *attempts* to
+    // one per five minutes, persisted in the registry so it holds across
+    // the fresh DLL instance every relaunch gets (a process-local flag
+    // wouldn't survive that). Local log/dump + the dialog below still
+    // always happen regardless; only the network attempt is throttled.
+    const DWORD CRASH_REPORT_THROTTLE_SEC = 300;
+    DWORD now = (DWORD)time(nullptr);
+    DWORD lastSentAt = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"LastCrashReportAt", 0);
+    bool throttled = (lastSentAt != 0) && (now - lastSentAt < CRASH_REPORT_THROTTLE_SEC);
 
-    ShowCrashDialog(code, addr, dumpOk ? dumpPath : L"(не удалось записать)", logPath, reportSent);
+    HANDLE hReportThread = nullptr;
+    if (!throttled) {
+        RegSetDW(HKEY_CURRENT_USER, REG_APP, L"LastCrashReportAt", now);
+        auto* job = new CrashReportJob{ LogBlob(), code, addr, dumpPath, dumpOk };
+        hReportThread = CreateThread(nullptr, 0, CrashReportThreadFn, job, 0, nullptr);
+        if (!hReportThread) { delete job; LogMsg("CRASH report thread CreateThread FAILED"); }
+    } else {
+        LogMsg("CRASH report send skipped (throttled)");
+    }
+
+    ShowCrashDialog(code, addr, dumpOk ? dumpPath : L"(не удалось записать)", logPath,
+        !throttled && hReportThread != nullptr);
+
+    // TaskDialogIndirect above already blocked for as long as the user took
+    // to click OK, which is normally plenty of time for the upload to
+    // finish on its own -- this is only a backstop for whoever dismisses it
+    // unusually fast, not the primary mechanism. 15s (not 3s) because a
+    // real dump is several MB (see SubmitCrashReportNow's own comment) and
+    // this is the last chance to let that finish before ExitProcess kills
+    // the thread mid-upload regardless of how close it was to done.
+    if (hReportThread) {
+        WaitForSingleObject(hReportThread, 15000);
+        CloseHandle(hReportThread);
+    }
     ExitProcess((UINT)code);
 }
 static void InstallCrashHandler() {
