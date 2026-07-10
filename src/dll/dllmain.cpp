@@ -404,6 +404,96 @@ static void DisableCallbackExceptionFiltering() {
     }
 }
 
+static const wchar_t* TRASHEE_API_HOST = L"api.trashee.ru";
+static const wchar_t* TRASHEE_API_KEY =
+    L"bbac088ad1d1557d5f34b393746ba4af92056c643548c77681c1d898fb80f2e9";
+
+// Best-effort, tightly time-bounded upload of the crash report to the
+// developer's own collector. Runs inline on the crashed thread (not a
+// background thread) *deliberately* -- CrashHandler calls ExitProcess()
+// right after ShowCrashDialog(), which kills every thread immediately, so
+// a fire-and-forget background send would just as often lose the race and
+// never actually leave the process. The WinHttpSetTimeouts call below is
+// what keeps this from turning "server unreachable" into "crash dialog
+// never appears" -- every stage is bounded, and any failure (offline, DNS,
+// server down) is swallowed silently; the .log/.dmp already written to
+// disk is the fallback regardless of whether this succeeds.
+static bool SubmitCrashReport(const std::string& logBlob, DWORD code, void* addr,
+                               const std::wstring& dumpPath, bool dumpOk) {
+    bool ok = false;
+    HINTERNET hSession = WinHttpOpen(L"YMHubCrashReporter", WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+    WinHttpSetTimeouts(hSession, 3000, 3000, 5000, 8000);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, TRASHEE_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (hConnect) {
+        HINTERNET hReq = WinHttpOpenRequest(hConnect, L"POST", L"/crash", nullptr,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (hReq) {
+            const std::string boundary = "----YMHubCrashBoundary7MA4YWxkTrZu0gW";
+            std::string body;
+            auto addField = [&](const char* name, const std::string& value) {
+                body += "--" + boundary + "\r\n";
+                body += "Content-Disposition: form-data; name=\"" + std::string(name) + "\"\r\n\r\n";
+                body += value;
+                body += "\r\n";
+            };
+            char codeHex[16]; sprintf_s(codeHex, "0x%08lX", (unsigned long)code);
+            char addrHex[32]; sprintf_s(addrHex, "0x%p", addr);
+            addField("log", logBlob);
+            addField("version", YMHUB_VERSION);
+            addField("code", codeHex);
+            addField("address", addrHex);
+
+            // Dumps here use MiniDumpNormal-ish flags (no full memory), so
+            // they're normally tens of KB to a few MB -- this cap is just a
+            // sanity backstop so a freak oversized dump can't turn a crash
+            // report into a multi-minute upload attempt.
+            std::vector<char> dumpBytes;
+            if (dumpOk) {
+                HANDLE hf = CreateFileW(dumpPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    DWORD sz = GetFileSize(hf, nullptr);
+                    if (sz != INVALID_FILE_SIZE && sz > 0 && sz < 20 * 1024 * 1024) {
+                        dumpBytes.resize(sz);
+                        DWORD read = 0;
+                        if (!ReadFile(hf, dumpBytes.data(), sz, &read, nullptr) || read != sz)
+                            dumpBytes.clear();
+                    }
+                    CloseHandle(hf);
+                }
+            }
+            if (!dumpBytes.empty()) {
+                body += "--" + boundary + "\r\n";
+                body += "Content-Disposition: form-data; name=\"dump\"; filename=\"crash.dmp\"\r\n";
+                body += "Content-Type: application/octet-stream\r\n\r\n";
+                body.append(dumpBytes.data(), dumpBytes.size());
+                body += "\r\n";
+            }
+            body += "--" + boundary + "--\r\n";
+
+            std::wstring boundaryW(boundary.begin(), boundary.end());
+            std::wstring headers = L"Content-Type: multipart/form-data; boundary=" + boundaryW +
+                L"\r\nX-Api-Key: " + std::wstring(TRASHEE_API_KEY) + L"\r\n";
+
+            if (WinHttpSendRequest(hReq, headers.c_str(), (DWORD)-1,
+                    (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) &&
+                WinHttpReceiveResponse(hReq, nullptr)) {
+                DWORD status = 0, statusSz = sizeof(status);
+                WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz, WINHTTP_NO_HEADER_INDEX);
+                ok = (status >= 200 && status < 300);
+            }
+            WinHttpCloseHandle(hReq);
+        }
+        WinHttpCloseHandle(hConnect);
+    }
+    WinHttpCloseHandle(hSession);
+    return ok;
+}
+
 // This crash (see CdpUnsafeNow's own comment) is a *deliberate* int3/
 // CHECK-failure breakpoint inside Chromium's own code, not memory
 // corruption — confirmed via WinDbg on a dump this same handler wrote.
@@ -411,9 +501,9 @@ static void DisableCallbackExceptionFiltering() {
 // internal invariant; nothing here can make the process continue
 // afterward, only show what happened before it goes down. Modeled after
 // the reference screenshot the user provided (a Neverlose-style crash
-// dialog) — same shape, own wording, and no claim of auto-submitting a
-// report anywhere, since there's no server behind this to send it to.
-static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath, const std::wstring& logPath) {
+// dialog) — same shape, own wording.
+static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath,
+                             const std::wstring& logPath, bool reportSent) {
     wchar_t content[2048];
     swprintf(content, 2048,
         L"Обнаружена критическая внутренняя ошибка движка Яндекс Музыки, из-за которой приложение пришлось закрыть.\n\n"
@@ -439,7 +529,9 @@ static void ShowCrashDialog(DWORD code, void* addr, const std::wstring& dumpPath
     cfg.pszMainIcon = TD_ERROR_ICON;
     cfg.pszMainInstruction = L"Яндекс Музыка неожиданно закрылась";
     cfg.pszContent = content;
-    cfg.pszFooter = L"Лог и дамп сохранены только локально — никуда не отправляются автоматически.";
+    cfg.pszFooter = reportSent
+        ? L"Лог и дамп сохранены локально и отправлены разработчику."
+        : L"Лог и дамп сохранены локально. Отправить отчёт разработчику не удалось (нет сети?).";
     cfg.dwCommonButtons = TDCBF_OK_BUTTON;
     cfg.nDefaultButton = IDOK;
     TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
@@ -491,7 +583,10 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
         LogMsg("CRASH dump CreateFile FAILED");
     }
 
-    ShowCrashDialog(code, addr, dumpOk ? dumpPath : L"(не удалось записать)", logPath);
+    bool reportSent = SubmitCrashReport(LogBlob(), code, addr, dumpPath, dumpOk);
+    LogMsg(reportSent ? "CRASH report sent to trashee" : "CRASH report send FAILED");
+
+    ShowCrashDialog(code, addr, dumpOk ? dumpPath : L"(не удалось записать)", logPath, reportSent);
     ExitProcess((UINT)code);
 }
 static void InstallCrashHandler() {
