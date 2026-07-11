@@ -32,17 +32,22 @@ struct IPCKey {
 
 // Bit indices for the "Твики" tweak mask — matches kTweakRules order in
 // dllmain.cpp and kTweakLabels' order in the in-page menu.
+// TWEAK_WAVE_PILL ("Моя волна обновилась" pill) removed -- Yandex Music
+// dropped that element from their own UI, so the tweak had nothing left to
+// hide. Everything after it shifted down a slot; existing saved
+// g_tweaksMask bits for users who had TWEAK_EXTRA_NAV..TWEAK_HIDE_NAME
+// toggled will point at a different tweak after this update (a one-time,
+// low-stakes remap -- easy to notice and re-toggle from the menu).
 enum {
     TWEAK_AI_WORDS    = 0, // AI-комментарии о треке (искра под плеером)
     TWEAK_VIBE_ANIM   = 1, // Анимация фона плеера
     TWEAK_RELEASE_PIN = 2, // Плашка "Версия приложения" / что нового
     TWEAK_WHEEL       = 3, // Барабан рекомендаций слева (плейлисты-карточки)
-    TWEAK_WAVE_PILL   = 4, // Плашка "Моя волна обновилась" в углу
-    TWEAK_EXTRA_NAV   = 5, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
-    TWEAK_PLUS_BADGE  = 6, // ссылка/плашка подписки Плюс рядом с именем профиля
-    TWEAK_BIG_COVER   = 7, // крупная обложка трека на странице "Моя волна"
-    TWEAK_HIDE_NAME   = 8, // подменяет имя пользователя на свой текст / "Скрыто"
-    TWEAK_COUNT       = 9,
+    TWEAK_EXTRA_NAV   = 4, // "Для вас и Тренды" / "Концерты" / "Книги и подкасты"
+    TWEAK_PLUS_BADGE  = 5, // ссылка/плашка подписки Плюс рядом с именем профиля
+    TWEAK_BIG_COVER   = 6, // крупная обложка трека на странице "Моя волна"
+    TWEAK_HIDE_NAME   = 7, // подменяет имя пользователя на свой текст / "Скрыто"
+    TWEAK_COUNT       = 8,
 };
 
 // Index order for the DLL's own YM-native-hotkey remap table

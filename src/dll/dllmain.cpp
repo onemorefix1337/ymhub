@@ -1250,7 +1250,7 @@ static void CdpSendYmKey(DWORD idx) {
 // to re-run on every LogBadgeThread tick as well as immediately on toggle
 // (WorkerThread's tweaksSeq watch), which keeps it self-healing across
 // YM's own SPA re-renders.
-static const char* kTweakRules[8] = {
+static const char* kTweakRules[7] = {
     "[class*='VibePage_words__']{display:none!important;}",      // AI-комментарии о треке
     "[data-test-id='VIBE_ANIMATION']{display:none!important;}",  // анимация фона плеера
     "[class*='MainPage_betaSlot__']{display:none!important;}",   // плашка "версия приложения"
@@ -1259,7 +1259,6 @@ static const char* kTweakRules[8] = {
                                          // the other child (already centered within
                                          // itself), so hiding this also re-centers
                                          // the player for free via flex redistribution
-    "[class*='MainPage_feedbackForm__']{display:none!important;}", // плашка "Моя волна обновилась"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_FOR_YOU_AND_TRENDS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_CONCERTS'],"
     "[data-test-id='NAVBAR_NAVIGATION_ITEM_NON_MUSIC']{display:none!important;}", // лишние разделы меню
@@ -1290,7 +1289,7 @@ static const char* kTweakRules[8] = {
 static void CdpApplyTweaks(DWORD mask, const wchar_t* customCssW) {
     if (!CdpEnsureConnected()) return;
     std::string css;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 7; i++) {
         if (mask & (1u << i)) css += kTweakRules[i];
     }
     if (customCssW && customCssW[0]) css += CdpUtf8(customCssW);
@@ -1528,9 +1527,9 @@ static void ExecCmd(DWORD cmd) {
 // button on list pages where several are rendered at once. Read-only
 // here, so that ambiguity (a pre-existing characteristic of those two
 // functions, not something this introduces) doesn't carry over.
-static const wchar_t* kTweakLabels[9] = {
+static const wchar_t* kTweakLabels[8] = {
     L"AI-комментарии о треке", L"Анимация фона плеера", L"Плашка «Версия приложения»",
-    L"Барабан рекомендаций", L"Плашка «Моя волна обновилась»", L"Лишние разделы меню",
+    L"Барабан рекомендаций", L"Лишние разделы меню",
     L"Плюс-бейдж в профиле", L"Крупная обложка трека", L"Скрыть имя пользователя",
 };
 
@@ -2016,7 +2015,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"}"
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
-        L"for(var i=0;i<9;i++){var sw=document.getElementById('yc-tw-'+i);"
+        L"for(var i=0;i<8;i++){var sw=document.getElementById('yc-tw-'+i);"
         L"if(sw)sw.classList.toggle('on',!!(window.__ymhubMask&(1<<i)));}"
         // Skips any button mid-capture ('rec') so a native-side refresh
         // landing while the user is actively pressing a new key can't
@@ -2031,7 +2030,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"})()";
     std::string preamble =
         "window.__ymhubTwLabels=[";
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 8; i++) {
         if (i) preamble += ",";
         preamble += "\"" + CdpJsonEscape(CdpUtf8(kTweakLabels[i])) + "\"";
     }
