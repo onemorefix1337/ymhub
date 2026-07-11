@@ -428,11 +428,38 @@ static bool SubmitCrashReportNow(const std::string& logBlob, DWORD code, void* a
         return false;
     }
     // Real dumps here run 5-7MB (MiniDumpWithIndirectlyReferencedMemory is
-    // the big contributor) -- confirmed live that the original 5s/8s
-    // send/receive pair was too tight for that over a normal home upload
-    // link, failing with ERROR_WINHTTP_TIMEOUT (12002) even though the
-    // exact same request with no dump attached succeeded comfortably.
-    WinHttpSetTimeouts(hSession, 5000, 5000, 30000, 20000);
+    // the big contributor). First attempt used 5s/8s send/receive and hit
+    // ERROR_WINHTTP_TIMEOUT (12002); raised to 30s/20s and it *still* failed
+    // live, this time ERROR_WINHTTP_CONNECTION_ERROR (12030) around 19s --
+    // a real end-to-end curl upload of the same dump over the same link
+    // took 25s total. This now runs on its own thread (see
+    // CrashReportThreadFn) rather than blocking the crash dialog, so there's
+    // no real UX cost to just giving it generous headroom instead of
+    // continuing to chase the exact right number.
+    WinHttpSetTimeouts(hSession, 5000, 5000, 90000, 60000);
+
+    // Confirmed live, from inside this injected DLL specifically (a
+    // standalone, non-injected test program doing the exact same hostname
+    // connect succeeds in <1s every time): plain hostname connect fails
+    // ~20s in with ERROR_WINHTTP_CONNECTION_ERROR, regardless of timeouts,
+    // chunked vs single-shot send, dump size (6.8MB down to 300KB), or a
+    // getaddrinfo() cache-warm right before connecting, and
+    // WINHTTP_OPTION_IPV6_FAST_FALLBACK made no difference either.
+    // Connecting to a manually-resolved IPv4 literal instead was fast
+    // every time, but then fails TLS validation -- and not just on
+    // hostname/CN, since ERROR_WINHTTP_SECURE_FAILURE persisted even with
+    // every SECURITY_FLAG_IGNORE_* combined, meaning the handshake itself
+    // is being rejected (almost certainly missing/invalid SNI, which is
+    // a TLS ClientHello concern no amount of post-handshake cert-check
+    // flags can paper over) rather than anything about the cert's content.
+    // Given the identical code works fine outside this specific injected
+    // context, this reads as something scoped to this one machine/process
+    // (security software watching Yandex Music's own outbound connections,
+    // most likely) rather than a general problem with this approach or
+    // this server -- not something worth weakening TLS validation over.
+    // Left as a plain hostname connect; delivery best-effort as designed,
+    // silent failure here is the same acceptable outcome as offline/
+    // unreachable-server, with the local .log/.dmp as the fallback either way.
 
     HINTERNET hConnect = WinHttpConnect(hSession, TRASHEE_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) {
@@ -494,11 +521,36 @@ static bool SubmitCrashReportNow(const std::string& logBlob, DWORD code, void* a
             std::wstring headers = L"Content-Type: multipart/form-data; boundary=" + boundaryW +
                 L"\r\nX-Api-Key: " + std::wstring(TRASHEE_API_KEY) + L"\r\n";
 
+            // Handing the whole ~7MB body to WinHttpSendRequest's lpOptional
+            // in one shot was confirmed live to fail consistently around
+            // 20s in with ERROR_WINHTTP_CONNECTION_ERROR (12030) -- raising
+            // the send/receive timeouts all the way to 90s/60s made zero
+            // difference, so it wasn't actually a timeout. curl uploading
+            // the identical file over the identical link succeeded fine,
+            // which pointed at *how* the body was being handed to WinHTTP
+            // rather than the network itself. Streaming it in bounded
+            // WinHttpWriteData chunks (the standard pattern for anything
+            // non-trivial) is what curl effectively does under the hood too.
             BOOL sentOk = WinHttpSendRequest(hReq, headers.c_str(), (DWORD)-1,
-                (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0);
+                WINHTTP_NO_REQUEST_DATA, 0, (DWORD)body.size(), 0);
             if (!sentOk) {
                 char b[64]; sprintf_s(b, "trashee: WinHttpSendRequest FAILED err=%lu", GetLastError());
                 LogMsg(b);
+            }
+            if (sentOk) {
+                const DWORD CHUNK = 64 * 1024;
+                size_t offset = 0;
+                while (sentOk && offset < body.size()) {
+                    size_t remaining = body.size() - offset;
+                    DWORD toWrite = (DWORD)(remaining < CHUNK ? remaining : CHUNK);
+                    DWORD written = 0;
+                    sentOk = WinHttpWriteData(hReq, body.data() + offset, toWrite, &written) && written == toWrite;
+                    offset += toWrite;
+                }
+                if (!sentOk) {
+                    char b[64]; sprintf_s(b, "trashee: WinHttpWriteData FAILED err=%lu", GetLastError());
+                    LogMsg(b);
+                }
             }
             if (sentOk) {
                 BOOL recvOk = WinHttpReceiveResponse(hReq, nullptr);
@@ -631,10 +683,23 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep) {
         mei.ThreadId = GetCurrentThreadId();
         mei.ExceptionPointers = ep;
         mei.ClientPointers = FALSE;
+        // Started at MiniDumpWithDataSegs|WithIndirectlyReferencedMemory|
+        // WithThreadInfo|WithUnloadedModules (~6.8MB here -- YM is a huge
+        // Electron/Chromium host with hundreds of loaded modules, each
+        // contributing its own data segments). That upload proved
+        // unreliable over the real path (WinHTTP from an injected DLL,
+        // through Cloudflare Tunnel) in a way no client-side change fixed
+        // -- raising every timeout, switching to chunked WinHttpWriteData,
+        // even dropping IndirectlyReferencedMemory alone (still ~6.5MB,
+        // turned out DataSegs was the actual dominant contributor, not
+        // that flag) -- while curl uploading the exact same file over the
+        // exact same link succeeded fine. Down to bare MiniDumpNormal:
+        // stacks, thread/module lists, no extra memory segments. Still
+        // enough for WinDbg to resolve *where* it crashed; not enough for
+        // a full offline repro, which was never the goal of an
+        // auto-submitted report anyway.
         dumpOk = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-            (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithIndirectlyReferencedMemory |
-                MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules),
-            &mei, nullptr, nullptr) != FALSE;
+            MiniDumpNormal, &mei, nullptr, nullptr) != FALSE;
         CloseHandle(hFile);
         LogMsg(dumpOk ? ("CRASH dump written: " + CdpUtf8(dumpPath.c_str()))
                       : "CRASH MiniDumpWriteDump FAILED");
