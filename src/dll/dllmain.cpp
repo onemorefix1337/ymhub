@@ -2448,8 +2448,23 @@ static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
             std::lock_guard<std::mutex> lk(g_cdpMx);
             CdpClose();
         } else if (CdpEnsureConnected()) {
-            CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
+            // Drain first: CdpInjectMenu's resync loop (the "for(var
+            // i=0;i<9...)"/"for(var bi=0;bi<6...)" tail of its own JS)
+            // rewrites every switch/bind button from the current native
+            // state on every call. Draining after it meant a click's
+            // optimistic UI update (toggle the class / show the new combo
+            // immediately, then queue the action) got stomped back to the
+            // *pre-click* state by this same tick's resync -- since the
+            // queued action hadn't been applied to g_tweaksMask/g_keys yet
+            // -- and only corrected itself on the *next* tick once drain
+            // had actually run. Confirmed live as exactly the reported
+            // symptom: on -> off -> on, and same for binds (new combo ->
+            // old combo -> new combo). Draining first means any action
+            // queued before this tick is already reflected in native state
+            // by the time InjectMenu reads it, so the resync matches what
+            // the user already sees and there's nothing to visibly correct.
             CdpQueueDrain();
+            CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
         }
         // Was 300ms — that's roughly 3x/sec of CDP traffic hitting the
         // renderer just to keep an already-injected menu current, which
