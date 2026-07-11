@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YMHub — оверлей и хаб для Яндекс Музыки</title>
+<title>YMHub — меню и оверлей для Яндекс Музыки</title>
 <link rel="icon" href="favicon.ico">
-<meta name="description" content="YMHub — компактный мини-плеер поверх всех окон, горячие клавиши, твики интерфейса и фоновое управление Яндекс Музыкой. Open source, без телеметрии.">
+<meta name="description" content="YMHub — компактный мини-плеер поверх всех окон, горячие клавиши и меню с твиками прямо внутри Яндекс Музыки. Ставится через Forge — тонкий инжектор, который закрывается сам. Open source, без телеметрии.">
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --ac:#5b8fff;--ac2:#7c6fff;--bg:#05050a;--sb:#020204;
-  --card:rgba(255,255,255,.035);--card2:rgba(255,255,255,.05);--bord:rgba(255,255,255,.07);--bord2:rgba(255,255,255,.1);
+  --ac:#ffffff;--ac2:#bdbdbd;--bg:#000000;--sb:#000000;
+  --card:rgba(255,255,255,.035);--card2:rgba(255,255,255,.05);--bord:rgba(255,255,255,.09);--bord2:rgba(255,255,255,.14);
   --txt:rgba(255,255,255,.94);--txt2:rgba(255,255,255,.52);--txt3:rgba(255,255,255,.32);
   --mono:'Cascadia Code','Consolas',ui-monospace,monospace;
 }
@@ -18,8 +18,8 @@ html{scroll-behavior:smooth}
 body{
   font-family:'Segoe UI Variable Text','Segoe UI',system-ui,-apple-system,sans-serif;
   background:var(--bg);color:var(--txt);
-  background-image:radial-gradient(circle at 18% -10%,rgba(91,143,255,.12),transparent 45%),
-    radial-gradient(circle at 85% 0%,rgba(124,111,255,.09),transparent 40%);
+  background-image:radial-gradient(circle at 18% -10%,rgba(255,255,255,.05),transparent 45%),
+    radial-gradient(circle at 85% 0%,rgba(255,255,255,.035),transparent 40%);
 }
 
 header{
@@ -30,8 +30,8 @@ header{
 .brand .logo{
   width:30px;height:30px;border-radius:9px;flex-shrink:0;
   background:linear-gradient(135deg,var(--ac),var(--ac2));
-  display:flex;align-items:center;justify-content:center;font-size:14px;
-  box-shadow:0 4px 16px rgba(91,143,255,.3);
+  display:flex;align-items:center;justify-content:center;font-size:14px;color:#000;
+  box-shadow:0 4px 16px rgba(255,255,255,.15);
 }
 nav{display:flex;gap:26px;align-items:center}
 nav a{color:var(--txt2);text-decoration:none;font-size:13.5px;font-weight:600;transition:color .15s}
@@ -45,7 +45,7 @@ nav a.gh{color:var(--txt)}
   background:var(--card2);border:1px solid var(--bord2);color:var(--txt2);
   font-size:12.5px;font-weight:600;margin-bottom:28px;
 }
-.hero .pill .dot{width:6px;height:6px;border-radius:50%;background:#3ddc84;box-shadow:0 0 7px rgba(61,220,132,.6)}
+.hero .pill .dot{width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 7px rgba(255,255,255,.7)}
 .hero h1{
   font-size:clamp(34px,6vw,58px);font-weight:800;line-height:1.08;letter-spacing:-.5px;
   background:linear-gradient(135deg,#fff 40%,var(--ac2));
@@ -59,11 +59,11 @@ nav a.gh{color:var(--txt)}
   display:inline-flex;align-items:center;gap:9px;height:48px;padding:0 26px;border-radius:14px;
   font-weight:700;font-size:14.5px;text-decoration:none;transition:all .15s;
 }
-.btn.primary{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;
-  box-shadow:0 8px 28px rgba(91,143,255,.3);}
-.btn.primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn.primary{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#000;
+  box-shadow:0 8px 28px rgba(255,255,255,.12);}
+.btn.primary:hover{filter:brightness(.94);transform:translateY(-1px)}
 .btn.ghost{background:var(--card2);border:1px solid var(--bord2);color:var(--txt)}
-.btn.ghost:hover{border-color:rgba(91,143,255,.4);color:var(--ac)}
+.btn.ghost:hover{border-color:rgba(255,255,255,.4);color:var(--ac)}
 .req{margin-top:16px;color:var(--txt3);font-size:12.5px}
 
 .section{max-width:1040px;margin:0 auto;padding:70px 24px}
@@ -77,10 +77,10 @@ nav a.gh{color:var(--txt)}
   background:var(--card);border:1px solid var(--bord);border-radius:18px;padding:22px;
   transition:border-color .2s,transform .2s,background .2s;
 }
-.card:hover{border-color:rgba(91,143,255,.3);transform:translateY(-2px);background:var(--card2)}
+.card:hover{border-color:rgba(255,255,255,.28);transform:translateY(-2px);background:var(--card2)}
 .card .ico{
   width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
-  font-size:17px;margin-bottom:14px;background:rgba(91,143,255,.13);
+  font-size:17px;margin-bottom:14px;background:rgba(255,255,255,.08);
 }
 .card h3{font-size:15px;font-weight:700;margin-bottom:7px}
 .card p{font-size:13px;color:var(--txt2);line-height:1.55}
@@ -96,8 +96,8 @@ nav a.gh{color:var(--txt)}
 .tech-row .label .dot{width:7px;height:7px;border-radius:50%;background:var(--ac);flex-shrink:0}
 .tech-row p{font-size:13.5px;color:var(--txt2);line-height:1.65}
 .tech-row code{
-  font-family:var(--mono);font-size:12px;background:rgba(255,255,255,.06);
-  padding:2px 6px;border-radius:5px;color:#a9c4ff;
+  font-family:var(--mono);font-size:12px;background:rgba(255,255,255,.08);
+  padding:2px 6px;border-radius:5px;color:#e2e2e2;
 }
 
 .flow{
@@ -113,13 +113,13 @@ nav a.gh{color:var(--txt)}
 
 .note{
   margin-top:28px;display:flex;gap:14px;padding:18px 20px;border-radius:14px;
-  background:rgba(91,143,255,.07);border:1px solid rgba(91,143,255,.18);
+  background:rgba(255,255,255,.05);border:1px solid var(--bord2);
 }
 .note .nico{font-size:18px;flex-shrink:0;line-height:1.3}
 .note p{font-size:13.5px;color:var(--txt2);line-height:1.6}
 .note b{color:var(--txt)}
 
-/* ── Tabs (hub feature breakdown) ── */
+/* ── Tabs (in-page menu feature breakdown) ── */
 .tabs-wrap{margin-top:42px;display:flex;flex-direction:column;gap:14px}
 .tabrow{
   background:var(--card);border:1px solid var(--bord);border-radius:16px;padding:20px 22px;
@@ -143,7 +143,7 @@ nav a.gh{color:var(--txt)}
   display:flex;gap:12px;align-items:flex-start;
 }
 .tw-card .twn{
-  width:22px;height:22px;border-radius:7px;background:rgba(91,143,255,.15);color:var(--ac);
+  width:22px;height:22px;border-radius:7px;background:rgba(255,255,255,.1);color:var(--ac);
   font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;
 }
 .tw-card h5{font-size:13.5px;font-weight:700;margin-bottom:4px}
@@ -153,7 +153,7 @@ nav a.gh{color:var(--txt)}
 .step{display:flex;gap:16px;align-items:flex-start;padding:16px;border-radius:14px;background:var(--card);border:1px solid var(--bord)}
 .step .n{
   width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--ac),var(--ac2));
-  color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  color:#000;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;
 }
 .step b{font-size:14px;display:block;margin-bottom:3px}
 .step span{font-size:13px;color:var(--txt2)}
@@ -163,12 +163,12 @@ nav a.gh{color:var(--txt)}
   background:var(--card);border:1px solid var(--bord);border-radius:18px;padding:18px;
   transition:border-color .2s,transform .2s;
 }
-.screen-card:hover{border-color:rgba(91,143,255,.3);transform:translateY(-2px)}
+.screen-card:hover{border-color:rgba(255,255,255,.28);transform:translateY(-2px)}
 .screen-card img{display:block;border-radius:12px;max-width:100%}
 .screen-card .cap{margin-top:12px;font-size:13px;font-weight:600;color:var(--txt2);text-align:center}
-.screen-card.hub img{width:480px}
-.screen-card.mini img{width:300px}
-@media (max-width:760px){.screen-card.hub img,.screen-card.mini img{width:100%}}
+.screen-card.menu img{width:340px}
+.screen-card.mini img{width:280px}
+@media (max-width:760px){.screen-card.menu img,.screen-card.mini img{width:100%}}
 
 /* ── FAQ ── */
 .faq{max-width:760px;margin:42px auto 0;display:flex;flex-direction:column;gap:10px}
@@ -202,19 +202,19 @@ footer a:hover{color:var(--ac)}
 <section class="hero">
   <div class="pill"><span class="dot"></span>Open source · Windows · без телеметрии</div>
   <h1>Яндекс Музыка,<br>но с панелью управления</h1>
-  <p>Компактный мини-плеер поверх всех окон, глобальные горячие клавиши,
-     твики интерфейса и фоновое управление воспроизведением — без
-     переключения на основное окно и без сторонних серверов.</p>
+  <p>Компактный мини-плеер поверх всех окон, глобальные горячие клавиши и
+     меню с твиками прямо внутри Яндекс Музыки — по тапу правого Shift,
+     без отдельных окон и без сторонних серверов.</p>
   <div class="cta">
-    <a class="btn primary" href="https://github.com/onemorefix1337/ymhub/releases/latest/download/YMHub.exe">⬇ Скачать YMHub.exe</a>
-    <a class="btn ghost" href="https://github.com/onemorefix1337/ymhub/releases">Все релизы</a>
+    <a class="btn primary" href="https://github.com/onemorefix1337/Forge/releases/latest/download/Forge.exe">⬇ Скачать Forge.exe</a>
+    <a class="btn ghost" href="https://github.com/onemorefix1337/Forge/releases">Все релизы</a>
   </div>
   <div class="req">Windows 10/11 · один файл · автообновление · бесплатно · исходники открыты</div>
 </section>
 
 <section class="section">
   <h2>Что внутри</h2>
-  <p class="sub">Один exe, без установщика, без рекламы и без фонового сбора данных</p>
+  <p class="sub">Один exe-инжектор, без установщика, без рекламы и без фонового сбора данных</p>
   <div class="grid">
     <div class="card">
       <div class="ico">🎴</div>
@@ -224,7 +224,12 @@ footer a:hover{color:var(--ac)}
     <div class="card">
       <div class="ico">⌨</div>
       <h3>Горячие клавиши</h3>
-      <p>Play/Pause, треки, лайк/дизлайк, шаффл и повтор — назначаются под себя и работают даже без фокуса окна Яндекс Музыки.</p>
+      <p>Play/Pause, треки, лайк/дизлайк — назначаются прямо в меню и работают даже без фокуса окна Яндекс Музыки.</p>
+    </div>
+    <div class="card">
+      <div class="ico">🎛</div>
+      <h3>Меню внутри Яндекс Музыки</h3>
+      <p>Тап правого Shift открывает панель прямо поверх страницы — плеер, твики и бинды в одном месте, без отдельного окна.</p>
     </div>
     <div class="card">
       <div class="ico">❤</div>
@@ -232,19 +237,14 @@ footer a:hover{color:var(--ac)}
       <p>Клик отправляется напрямую в страницу через Chrome DevTools Protocol — переключаться на окно Яндекс Музыки не нужно.</p>
     </div>
     <div class="card">
-      <div class="ico">🎛</div>
+      <div class="ico">🎚</div>
       <h3>Твики интерфейса</h3>
-      <p>9 переключателей, которые убирают рекламные плашки, лишние разделы меню, увеличивают обложку или скрывают имя профиля.</p>
-    </div>
-    <div class="card">
-      <div class="ico">↻</div>
-      <h3>Автообновление</h3>
-      <p>Проверяет новые версии в релизах GitHub и предлагает установить — без ручного скачивания и без сторонних серверов обновлений.</p>
+      <p>8 переключателей, которые убирают рекламные плашки, лишние разделы меню, увеличивают обложку или скрывают имя профиля.</p>
     </div>
     <div class="card">
       <div class="ico">📦</div>
-      <h3>Один файл</h3>
-      <p>Никаких лишних DLL и установщиков рядом — всё нужное упаковано прямо в YMHub.exe, включая интерфейс хаба на WebView2.</p>
+      <h3>Тонкий инжектор</h3>
+      <p>Forge — один exe: находит или запускает Яндекс Музыку, подключается и закрывается сам. Ничего не остаётся висеть в фоне отдельным процессом.</p>
     </div>
   </div>
 </section>
@@ -255,9 +255,9 @@ footer a:hover{color:var(--ac)}
      управляет Яндекс Музыкой без переключения окон</p>
 
   <div class="flow">
-    <div class="fb">YMHub.exe<span>хаб + оверлей</span></div>
+    <div class="fb">Forge.exe<span>инжектор, закрывается сам</span></div>
     <div class="arrow">→</div>
-    <div class="fb">YMHubDll.dll<span>внедряется в процесс ЯМ</span></div>
+    <div class="fb">YMHubDll.dll<span>всё живёт внутри процесса ЯМ</span></div>
     <div class="arrow">→</div>
     <div class="fb">DevTools Protocol<span>команды в страницу</span></div>
     <div class="arrow">→</div>
@@ -268,9 +268,11 @@ footer a:hover{color:var(--ac)}
     <div class="tech-row">
       <div class="label"><span class="dot"></span>Внедрение в процесс</div>
       <p>«Яндекс Музыка» на Windows — это Electron-приложение, то есть обычный Chromium
-         внутри. YMHub запускает её со своей небольшой <code>YMHubDll.dll</code>,
-         загруженной в тот же процесс. DLL не патчит и не подменяет файлы самого
-         приложения — после закрытия YMHub оно работает как обычно.</p>
+         внутри. <code>Forge.exe</code> запускает или находит уже запущенную ЯМ и
+         внедряет в тот же процесс небольшую <code>YMHubDll.dll</code>, после чего сам
+         завершается — резидентного хост-процесса нет вообще. DLL не патчит и не
+         подменяет файлы самого приложения — если закрыть Яндекс Музыку, всё
+         исчезает вместе с ней, ничего не остаётся работать в фоне.</p>
     </div>
     <div class="tech-row">
       <div class="label"><span class="dot"></span>Chrome DevTools Protocol</div>
@@ -283,12 +285,12 @@ footer a:hover{color:var(--ac)}
          API Яндекса здесь нет.</p>
     </div>
     <div class="tech-row">
-      <div class="label"><span class="dot"></span>Связь хаба и DLL</div>
-      <p>YMHub.exe и DLL внутри Яндекс Музыки — два разных процесса, поэтому они
-         обмениваются состоянием через область разделяемой памяти (Windows
-         shared memory): названием трека, статусом лайка, горячими клавишами,
-         текущей маской твиков. Никакого сетевого сокета между ними нет —
-         это происходит локально и мгновенно.</p>
+      <div class="label"><span class="dot"></span>Всё в одном процессе</div>
+      <p>Мини-плеер, горячие клавиши, меню и твики — не отдельная программа,
+         а часть той же <code>YMHubDll.dll</code>, работающая внутри процесса Яндекс
+         Музыки. Синхронизировать состояние между процессами не нужно — раньше
+         так и было (отдельный хост + разделяемая память), но с переходом на
+         Forge отдельный резидентный процесс убрали целиком.</p>
     </div>
     <div class="tech-row">
       <div class="label"><span class="dot"></span>Твики интерфейса</div>
@@ -307,69 +309,55 @@ footer a:hover{color:var(--ac)}
     </div>
     <div class="tech-row">
       <div class="label"><span class="dot"></span>Сеть и обновления</div>
-      <p>Единственное сетевое обращение, которое делает YMHub сам — проверка
-         последнего релиза через публичный GitHub Releases API и скачивание
-         нового <code>YMHub.exe</code> оттуда же. Никакой телеметрии, аналитики
-         или фоновой отправки данных не происходит.</p>
+      <p>Forge проверяет свежие версии себя и <code>YMHubDll.dll</code> через
+         публичный GitHub Releases API и подтягивает новые файлы оттуда же —
+         никакого стороннего сервера обновлений. Отдельно: если DLL аварийно
+         завершится, она может (в фоне, без блокировки чего-либо) отправить
+         короткий лог и дамп краша на собственный сервер разработчика — это
+         разовая диагностика конкретно падения, а не постоянная телеметрия
+         или сбор статистики использования.</p>
     </div>
   </div>
 
   <div class="note">
     <div class="nico">🔓</div>
-    <p><b>Исходный код полностью открыт</b> — весь C++/WinAPI-код хаба, DLL и
-       инжектора лежит в репозитории на GitHub. Любой может собрать YMHub
-       самостоятельно по инструкции в README и убедиться, что в нём нет ничего
-       лишнего, либо доработать под себя.</p>
+    <p><b>Исходный код полностью открыт</b> — весь C++/WinAPI-код DLL и
+       инжектора Forge лежит в открытых репозиториях на GitHub. Любой может
+       собрать всё самостоятельно по инструкции в README и убедиться, что
+       внутри нет ничего лишнего, либо доработать под себя.</p>
   </div>
 </section>
 
 <section class="section">
-  <h2>Что внутри окна хаба</h2>
-  <p class="sub">Пять вкладок — всё управление в одном компактном окне</p>
+  <h2>Меню внутри Яндекс Музыки</h2>
+  <p class="sub">Тап правого Shift — и панель уже открыта прямо поверх страницы, без переключения окон</p>
   <div class="tabs-wrap">
     <div class="tabrow">
       <div class="ti">▶</div>
       <div>
         <h4>Плеер</h4>
         <p>Обложка, название и артист текущего трека, play/pause/prev/next, лайк и дизлайк —
-           без переключения на окно Яндекс Музыки. Здесь же включается мини-плеер
-           и выбирается один из шести углов экрана для его закрепления.</p>
-      </div>
-    </div>
-    <div class="tabrow">
-      <div class="ti">⌨</div>
-      <div>
-        <h4>Горячие клавиши</h4>
-        <p>Свои глобальные комбинации для play/pause, треков, лайка/дизлайка,
-           шаффла и повтора — работают независимо от того, какое окно сейчас
-           активно. Отдельно — переназначение встроенных клавиш самой Яндекс
-           Музыки (играют только когда её окно в фокусе).</p>
-      </div>
-    </div>
-    <div class="tabrow">
-      <div class="ti">🔌</div>
-      <div>
-        <h4>Плагины</h4>
-        <p>Включение/выключение <b>YM Sync</b> — DLL, которая даёт прямое
-           управление лайками/дизлайками/шаффлом/повтором без фокуса окна, и
-           <b>YM Overlay</b> — мини-плеера поверх всех окон.</p>
+           без переключения на окно Яндекс Музыки.</p>
       </div>
     </div>
     <div class="tabrow">
       <div class="ti">🎛</div>
       <div>
         <h4>Твики</h4>
-        <p>9 переключателей для интерфейса самой Яндекс Музыки — от скрытия
+        <p>8 переключателей для интерфейса самой Яндекс Музыки — от скрытия
            рекламных плашек до увеличения обложки трека. Применяются сразу,
            без перезапуска приложения. Полный список — ниже.</p>
       </div>
     </div>
     <div class="tabrow">
-      <div class="ti">ⓘ</div>
+      <div class="ti">⌨</div>
       <div>
-        <h4>О приложении</h4>
-        <p>Текущая версия YMHub, проверка обновлений и установка новой версии
-           в один клик прямо из хаба.</p>
+        <h4>Бинды</h4>
+        <p>Свои глобальные комбинации для показа/скрытия мини-плеера, треков,
+           лайка/дизлайка и паузы — работают независимо от того, какое окно
+           сейчас активно. Отдельно — переназначение встроенных клавиш самой
+           Яндекс Музыки (играют только когда её окно в фокусе). Клик по
+           кнопке — и следующее нажатие клавиш сразу становится новым биндом.</p>
       </div>
     </div>
   </div>
@@ -383,15 +371,14 @@ footer a:hover{color:var(--ac)}
     <div class="tw-card"><div class="twn">2</div><div><h5>Анимация фона плеера</h5><p>Отключает цветной волновой фон на странице «Моя волна».</p></div></div>
     <div class="tw-card"><div class="twn">3</div><div><h5>Плашка «Версия приложения»</h5><p>Убирает кнопку с заметками о новой версии Яндекс Музыки.</p></div></div>
     <div class="tw-card"><div class="twn">4</div><div><h5>Барабан рекомендаций</h5><p>Скрывает карточки плейлистов слева — плеер занимает всю ширину окна.</p></div></div>
-    <div class="tw-card"><div class="twn">5</div><div><h5>Плашка «Моя волна обновилась»</h5><p>Убирает уведомление в правом верхнем углу.</p></div></div>
-    <div class="tw-card"><div class="twn">6</div><div><h5>Лишние разделы меню</h5><p>Скрывает «Для вас и Тренды», «Концерты», «Книги и подкасты» в навигации.</p></div></div>
-    <div class="tw-card"><div class="twn">7</div><div><h5>Плюс-бейдж в профиле</h5><p>Убирает ссылку и плашку подписки рядом с именем профиля.</p></div></div>
-    <div class="tw-card"><div class="twn">8</div><div><h5>Крупная обложка трека</h5><p>Увеличивает обложку на странице «Моя волна» и слегка сдвигает имя артиста, чтобы не перекрывалось.</p></div></div>
-    <div class="tw-card"><div class="twn">9</div><div><h5>Скрыть имя пользователя</h5><p>Подменяет имя на своё или на «Скрыто» — и в сайдбаре, и в выпадающем меню профиля вместе с телефоном/логином.</p></div></div>
+    <div class="tw-card"><div class="twn">5</div><div><h5>Лишние разделы меню</h5><p>Скрывает «Для вас и Тренды», «Концерты», «Книги и подкасты» в навигации.</p></div></div>
+    <div class="tw-card"><div class="twn">6</div><div><h5>Плюс-бейдж в профиле</h5><p>Убирает ссылку и плашку подписки рядом с именем профиля.</p></div></div>
+    <div class="tw-card"><div class="twn">7</div><div><h5>Крупная обложка трека</h5><p>Увеличивает обложку на странице «Моя волна» и слегка сдвигает имя артиста, чтобы не перекрывалось.</p></div></div>
+    <div class="tw-card"><div class="twn">8</div><div><h5>Скрыть имя пользователя</h5><p>Подменяет имя на своё или на «Скрыто» — и в сайдбаре, и в выпадающем меню профиля вместе с телефоном/логином.</p></div></div>
   </div>
   <div class="note">
     <div class="nico">📝</div>
-    <p><b>Хотите больше, чем эти 9 переключателей?</b> На той же вкладке есть поле «Свой CSS» для
+    <p><b>Хотите больше, чем эти 8 переключателей?</b> На той же вкладке есть поле «Свой CSS» для
        произвольных правил — если никогда не писали CSS, есть
        <a href="css-guide.html" style="color:var(--ac)">пошаговый гайд для новичков</a>.</p>
   </div>
@@ -399,11 +386,15 @@ footer a:hover{color:var(--ac)}
 
 <section class="section">
   <h2>Демо</h2>
-  <p class="sub">Лайк, пауза и переключение треков — без переключения на окно Яндекс Музыки</p>
+  <p class="sub">Меню открывается прямо поверх Яндекс Музыки — без отдельного окна</p>
   <div class="screens">
-    <div class="screen-card hub">
-      <img src="img/hub-player.png" alt="Вкладка «Плеер» в окне YMHub" loading="lazy">
-      <div class="cap">Окно хаба — вкладка «Плеер»</div>
+    <div class="screen-card menu">
+      <img src="img/menu-tweaks.png" alt="Меню YMHub — вкладка «Твики»" loading="lazy">
+      <div class="cap">Меню — вкладка «Твики»</div>
+    </div>
+    <div class="screen-card menu">
+      <img src="img/menu-binds.png" alt="Меню YMHub — вкладка «Бинды»" loading="lazy">
+      <div class="cap">Меню — вкладка «Бинды»</div>
     </div>
     <div class="screen-card mini">
       <img src="img/miniplayer.png" alt="Мини-плеер YMHub поверх всех окон" loading="lazy">
@@ -415,9 +406,9 @@ footer a:hover{color:var(--ac)}
 <section class="section alt">
   <h2>Как начать</h2>
   <div class="steps">
-    <div class="step"><div class="n">1</div><div><b>Скачайте YMHub.exe</b><span>Один файл, ничего распаковывать не нужно.</span></div></div>
-    <div class="step"><div class="n">2</div><div><b>Запустите рядом с Яндекс Музыкой</b><span>YMHub сам подключится и настроит всё необходимое.</span></div></div>
-    <div class="step"><div class="n">3</div><div><b>Настройте горячие клавиши и твики</b><span>В окне хаба — на вкладках «Горячие клавиши» и «Твики».</span></div></div>
+    <div class="step"><div class="n">1</div><div><b>Скачайте Forge.exe</b><span>Один файл, ничего распаковывать не нужно.</span></div></div>
+    <div class="step"><div class="n">2</div><div><b>Запустите рядом с Яндекс Музыкой</b><span>Forge сам найдёт или запустит её, подключится и закроется.</span></div></div>
+    <div class="step"><div class="n">3</div><div><b>Тапните правый Shift внутри Яндекс Музыки</b><span>Откроется меню — там же настраиваются твики и бинды.</span></div></div>
   </div>
 </section>
 
@@ -425,7 +416,15 @@ footer a:hover{color:var(--ac)}
   <h2>Частые вопросы</h2>
   <div class="faq">
     <details>
-      <summary>Это безопасно? Зачем YMHub лезет в процесс Яндекс Музыки?</summary>
+      <summary>Что такое Forge?</summary>
+      <p>Тонкий инжектор — единственная программа, которую нужно скачать и запустить.
+         Он проверяет обновления, находит или запускает Яндекс Музыку, подключает
+         к ней <code style="font-family:inherit">YMHubDll.dll</code> и сразу закрывается сам —
+         резидентно в фоне ничего не остаётся, вся дальнейшая работа (мини-плеер,
+         меню, твики) происходит уже внутри процесса самой Яндекс Музыки.</p>
+    </details>
+    <details>
+      <summary>Это безопасно? Зачем Forge лезет в процесс Яндекс Музыки?</summary>
       <p>Внедрение DLL — единственный способ доверенно отправлять команды (лайк,
          плей/пауза, твики) внутрь Chromium-страницы Яндекс Музыки без эмуляции
          нажатий клавиш. DLL делает это через стандартный Chrome DevTools Protocol —
@@ -434,15 +433,18 @@ footer a:hover{color:var(--ac)}
     </details>
     <details>
       <summary>YMHub отправляет какие-то данные на сервер?</summary>
-      <p>Нет. Единственное сетевое обращение — проверка номера последнего релиза
-         на GitHub и скачивание обновлённого exe оттуда же. Никакой аналитики,
-         статистики использования или личных данных никуда не отправляется.</p>
+      <p>В обычной работе — нет: единственное регулярное сетевое обращение —
+         проверка номера последнего релиза на GitHub и скачивание обновлённых
+         файлов оттуда же. Исключение — если DLL аварийно завершится: тогда она
+         может отправить короткий лог и дамп краша на сервер разработчика для
+         отладки конкретно этого падения. Обычной аналитики, статистики
+         использования или отслеживания действий — нет.</p>
     </details>
     <details>
       <summary>Нужны права администратора?</summary>
-      <p>Нет. YMHub запускается из-под обычного пользователя, настройки хранятся
+      <p>Нет. Forge и DLL запускаются из-под обычного пользователя, настройки хранятся
          в пользовательской ветке реестра <code style="font-family:inherit">HKCU</code>, установщика нет вообще —
-         это один портативный exe.</p>
+         Forge — один портативный exe.</p>
     </details>
     <details>
       <summary>Это связано с «Яндексом» официально?</summary>
@@ -452,9 +454,10 @@ footer a:hover{color:var(--ac)}
     </details>
     <details>
       <summary>Как обновляется YMHub?</summary>
-      <p>Хаб сам проверяет новые версии в релизах GitHub и предлагает установить
-         обновление на вкладке «О приложении» — скачивание и замену файла он
-         делает сам, вручную ничего скачивать не нужно.</p>
+      <p>При каждом запуске Forge сам проверяет свежие релизы — и свои, и
+         <code style="font-family:inherit">YMHubDll.dll</code> — и подтягивает новые файлы с GitHub
+         перед тем, как подключиться к Яндекс Музыке. Вручную скачивать
+         обновления не нужно, достаточно запускать Forge как обычно.</p>
     </details>
   </div>
 </section>
@@ -462,6 +465,8 @@ footer a:hover{color:var(--ac)}
 <footer>
   YMHub — независимый проект, не связан с «Яндексом». Исходный код открыт.<br>
   <a href="https://github.com/onemorefix1337/ymhub" target="_blank" rel="noopener">github.com/onemorefix1337/ymhub</a>
+  ·
+  <a href="https://github.com/onemorefix1337/Forge" target="_blank" rel="noopener">github.com/onemorefix1337/Forge</a>
 </footer>
 
 </body>
