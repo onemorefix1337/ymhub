@@ -17,5 +17,6 @@ target_link_libraries(YMHubDll PRIVATE
     runtimeobject windowscodecs shcore ole32 oleaut32)
 target_link_options(YMHubDll PRIVATE /DEBUG)
 set_target_properties(YMHubDll PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION TRUE
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     OUTPUT_NAME "YMHubDll")

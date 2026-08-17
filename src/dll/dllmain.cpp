@@ -123,6 +123,12 @@ static DWORD        g_tweaksMask = 0;
 static std::wstring g_customName;
 static std::wstring g_customCss;
 static bool         g_cheatMenuEnabled = false;
+
+static bool         g_discordEnabled = true;
+static bool         g_bridgeEnabled = true;
+static void SaveDiscordSetting(bool on);
+static void SaveBridgeSetting(bool on);
+
 static void ApplyTweaksNow() {
     CdpApplyTweaks(g_tweaksMask, g_customCss.c_str());
     bool hideName = (g_tweaksMask & (1u << TWEAK_HIDE_NAME)) != 0;
@@ -244,11 +250,8 @@ static volatile LONGLONG g_transitionCooldownUntil = 0; // GetTickCount64() dead
 // trivial work hook procs must never do. Keep this to the one atomic
 // write, nothing else, ever.
 static LRESULT CALLBACK TransitionWatchProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION) {
-        const CWPSTRUCT* cwp = reinterpret_cast<const CWPSTRUCT*>(lParam);
-        if (cwp->message == WM_WINDOWPOSCHANGING || cwp->message == WM_SYSCOMMAND) {
-            InterlockedExchange64(&g_transitionCooldownUntil, (LONGLONG)GetTickCount64() + 2500);
-        }
+    if (nCode == HCBT_MINMAX || nCode == HCBT_SYSCOMMAND || nCode == HCBT_SETFOCUS) {
+        InterlockedExchange64(&g_transitionCooldownUntil, (LONGLONG)GetTickCount64() + 2500);
     }
     return CallNextHookEx(g_transitionHook, nCode, wParam, lParam);
 }
@@ -261,7 +264,7 @@ static void EnsureTransitionWatch() {
     if (!main) return;
     DWORD tid = GetWindowThreadProcessId(main, nullptr);
     if (!tid) return;
-    g_transitionHook = SetWindowsHookExW(WH_CALLWNDPROC, TransitionWatchProc, g_hInst, tid);
+    g_transitionHook = SetWindowsHookExW(WH_CBT, TransitionWatchProc, g_hInst, tid);
     LogMsg(g_transitionHook
         ? ("TransitionWatch installed on tid=" + std::to_string(tid))
         : ("TransitionWatch FAILED, err=" + std::to_string(GetLastError())));
@@ -858,6 +861,9 @@ static void WaitUntilSafeForCdp() {
     }
 }
 
+static bool CdpSend(const std::string& msg);
+static bool CdpRecv(std::string& out);
+
 static bool CdpEnsureConnected() {
     if (g_cdpWs) return true;
     std::wstring path = CdpFindWsPath();
@@ -878,6 +884,12 @@ static bool CdpEnsureConnected() {
     if (ok) g_cdpWs = WinHttpWebSocketCompleteUpgrade(hReq, 0);
     WinHttpCloseHandle(hReq);
     if (!g_cdpWs) { CdpClose(); return false; }
+    
+    CdpSend("{\"id\":999,\"method\":\"Network.enable\"}");
+    std::string resp; CdpRecv(resp);
+    CdpSend("{\"id\":1000,\"method\":\"Network.setBlockedURLs\",\"params\":{\"urls\":[\"*mc.yandex.ru*\",\"*metrika*\",\"*sentry*\",\"*appmetrica*\",\"*crashlytics*\"]}}");
+    CdpRecv(resp);
+    
     return true;
 }
 
@@ -1439,8 +1451,8 @@ static void CdpApplyPassportNameHide(bool on, const wchar_t* customNameW) {
         "function swap(el,blank){if(!el)return;"
         "if(on){if(!el.dataset.ymhubOrig)el.dataset.ymhubOrig=el.textContent;el.textContent=blank?'':rep;}"
         "else if(el.dataset.ymhubOrig){el.textContent=el.dataset.ymhubOrig;delete el.dataset.ymhubOrig;}}"
-        "swap(document.querySelector(\"[class*='_title_1aljm_']\"),false);"
-        "swap(document.querySelector(\"[class*='_caption_1aljm_']\"),true);"
+        "var t=document.querySelector('.UserItem-FirstLine')||document.querySelector('.UserId-FirstLine')||document.querySelector(\"[class*='title_']\"); swap(t,false);"
+        "var c=document.querySelector(\"[data-testid='user-login']\")||document.querySelector(\"[class*='caption_']\"); swap(c,true);"
         "document.querySelectorAll(\"[data-testid='user-item']\").forEach(function(item){"
         "if(on){if(!item.dataset.ymhubOrig){"
         "var orig=[];var w=document.createTreeWalker(item,NodeFilter.SHOW_TEXT);var n;"
@@ -1632,25 +1644,9 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // own ::before layer that fades via opacity (which *does*
         // interpolate) is what makes the on/off flip actually animate
         // instead of only the knob sliding while the track color jumps.
-        L"#ymhub-cheat .yc-rail-adv{width:26px;height:16px;border-radius:99px;flex-shrink:0;margin-bottom:6px;"
-        L"background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.08);position:relative;cursor:pointer;"
-        L"overflow:hidden;transition:border-color .3s ease;}"
-        // This whole CSS blob is itself one big JS single-quoted string
-        // (st.textContent='...') -- an unescaped '' for the CSS content
-        // property terminates that JS string right there instead of
-        // producing an empty CSS string, corrupting everything after it
-        // into raw (invalid) JS. Confirmed live: broke CdpInjectMenu's
-        // entire script, not just this rule -- #ymhub-cheat never
-        // appeared at all as a result, menu included.
-        L"#ymhub-cheat .yc-rail-adv::before{content:\\'\\';position:absolute;inset:0;border-radius:inherit;"
-        L"background:linear-gradient(135deg,#5b8fff,#7c6fff);opacity:0;transition:opacity .3s ease;}"
-        L"#ymhub-cheat .yc-rail-adv.on{border-color:transparent;}"
-        L"#ymhub-cheat .yc-rail-adv.on::before{opacity:1;}"
-        L"#ymhub-cheat .yc-rail-adv .yc-knob{width:10px;height:10px;top:2px;left:2px;}"
-        L"#ymhub-cheat .yc-rail-adv.on .yc-knob{left:14px;}"
         L"#ymhub-cheat .yc-pane{flex:1;min-width:0;}"
         // Everything else in this panel is transitioned (rail items,
-        // switches, buttons) but switching between Player/Твики/Pro itself
+        // switches, buttons) but switching between Твики/Бинды itself
         // used to be an instant display:none/block snap — the one
         // interaction in here with zero animation. display can't be
         // transitioned directly, but pairing it with an opacity fade-in
@@ -1660,35 +1656,6 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"#ymhub-cheat .yc-sec{display:none;opacity:0;}"
         L"#ymhub-cheat .yc-sec.active{display:block;opacity:1;animation:ycSecIn .18s ease;}"
         L"@keyframes ycSecIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}"
-        L"#ymhub-cheat .yc-player{display:flex;gap:10px;align-items:center;margin-bottom:12px;}"
-        L"#ymhub-cheat .yc-cover{width:44px;height:44px;border-radius:10px;background:rgba(255,255,255,.05);"
-        L"object-fit:cover;flex-shrink:0;}"
-        L"#ymhub-cheat .yc-meta{overflow:hidden;}"
-        L"#ymhub-cheat .yc-title{font-weight:600;font-size:12.5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}"
-        L"#ymhub-cheat .yc-artist{font-size:11.5px;color:rgba(255,255,255,.4);white-space:nowrap;"
-        L"text-overflow:ellipsis;overflow:hidden;margin-top:2px;}"
-        // .yc-cb/.yc-skip/.yc-play/.yc-like/.yc-dislike mirror the
-        // mini-player overlay's own .cb/.skip/#pbtn/#btn-like/#btn-dislike
-        // (same file, the HTML constant) — same shapes, same hover/active
-        // feel, just sized for this panel.
-        L"#ymhub-cheat .yc-controls{display:flex;align-items:center;gap:6px;}"
-        L"#ymhub-cheat .yc-cb{border:none;cursor:pointer;border-radius:50%;flex-shrink:0;"
-        L"display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.65);"
-        L"background:rgba(255,255,255,.06);transition:transform .15s,background .15s,color .15s;}"
-        L"#ymhub-cheat .yc-cb:hover{background:rgba(255,255,255,.13);color:#fff;transform:scale(1.07);}"
-        L"#ymhub-cheat .yc-cb:active{transform:scale(.88);}"
-        L"#ymhub-cheat .yc-cb:disabled{opacity:.3;pointer-events:none;}"
-        L"#ymhub-cheat .yc-skip{width:30px;height:30px;}"
-        L"#ymhub-cheat .yc-play{width:38px;height:38px;"
-        L"background:linear-gradient(135deg,#5b8fff,#7c6fff);color:#fff;}"
-        L"#ymhub-cheat .yc-play:hover{filter:brightness(1.1);transform:scale(1.06);}"
-        L"#ymhub-cheat .yc-like{width:30px;height:30px;color:rgba(255,255,255,.4);}"
-        L"#ymhub-cheat .yc-like:hover{background:rgba(255,80,100,.18);color:rgba(255,100,120,.9);}"
-        L"#ymhub-cheat .yc-like.on{background:rgba(255,60,90,.22);color:#ff4d6d;}"
-        L"#ymhub-cheat .yc-dislike{width:30px;height:30px;color:rgba(255,255,255,.3);}"
-        L"#ymhub-cheat .yc-dislike:hover{background:rgba(255,255,255,.12);color:rgba(255,255,255,.7);}"
-        L"#ymhub-cheat .yc-modebtn{width:34px;height:34px;}"
-        L"#ymhub-cheat .yc-modebtn.on{background:rgba(91,143,255,.18);color:#5b8fff;}"
         L"#ymhub-cheat .yc-sectitle{font-weight:700;font-size:11px;color:rgba(255,255,255,.4);"
         L"text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px;}"
         // .yc-tw-row/.yc-tw-switch/.yc-knob mirror the hub's own
@@ -1724,17 +1691,6 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"color:rgba(255,255,255,.88);font:11px Consolas,\"Cascadia Code\",monospace;"
         L"padding:8px;box-sizing:border-box;outline:none;transition:border-color .2s ease;}"
         L"#ymhub-cheat .yc-css:focus{border-color:rgba(91,143,255,.4);}"
-        // Advanced-only "YM Pro" section: seek + volume + shuffle/repeat —
-        // native range inputs restyled to match the rest of the panel.
-        L"#ymhub-cheat .yc-seekrow,#ymhub-cheat .yc-volrow{display:flex;align-items:center;gap:8px;}"
-        L"#ymhub-cheat .yc-time{font-size:10.5px;color:rgba(255,255,255,.4);flex-shrink:0;width:34px;}"
-        L"#ymhub-cheat .yc-time.end{text-align:right;}"
-        L"#ymhub-cheat input[type=range]{flex:1;-webkit-appearance:none;height:4px;border-radius:99px;"
-        L"background:rgba(255,255,255,.12);outline:none;cursor:pointer;margin:0;}"
-        L"#ymhub-cheat input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;"
-        L"width:12px;height:12px;border-radius:50%;background:#5b8fff;box-shadow:0 1px 3px rgba(0,0,0,.4);}"
-        L"#ymhub-cheat .yc-volicon{color:rgba(255,255,255,.4);flex-shrink:0;display:flex;}"
-        L"#ymhub-cheat input[type=range]:disabled{opacity:.3;cursor:default;}"
         L"';"
         L"document.head.appendChild(st);"
         L"ROOT=document.createElement('div');ROOT.id='ymhub-cheat';"
@@ -1750,50 +1706,16 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"<div class=\"yc-head\">YMHub <span class=\"yc-hint\" id=\"yc-close\">Shift — закрыть</span></div>"
         L"<div class=\"yc-body\">"
         L"<div class=\"yc-rail\">"
-        L"<div class=\"yc-rail-item active\" id=\"yc-rail-player\" data-sec=\"player\" title=\"Плеер\">"
-        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
-        L"<path d=\"M9 18V5l12-2v13\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
-        L"<circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"18\" cy=\"16\" r=\"3\"/></svg></div>"
-        L"<div class=\"yc-rail-item\" id=\"yc-rail-tweaks\" data-sec=\"tweaks\" title=\"Твики\">"
-        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\">"
-        L"<line x1=\"4\" y1=\"21\" x2=\"4\" y2=\"14\"/><line x1=\"4\" y1=\"10\" x2=\"4\" y2=\"3\"/>"
-        L"<line x1=\"12\" y1=\"21\" x2=\"12\" y2=\"12\"/><line x1=\"12\" y1=\"8\" x2=\"12\" y2=\"3\"/>"
-        L"<line x1=\"20\" y1=\"21\" x2=\"20\" y2=\"16\"/><line x1=\"20\" y1=\"12\" x2=\"20\" y2=\"3\"/>"
-        L"<circle cx=\"4\" cy=\"12\" r=\"2\" fill=\"currentColor\"/><circle cx=\"12\" cy=\"10\" r=\"2\" fill=\"currentColor\"/>"
-        L"<circle cx=\"20\" cy=\"14\" r=\"2\" fill=\"currentColor\"/></svg></div>"
-        L"<div class=\"yc-rail-item\" id=\"yc-rail-binds\" data-sec=\"binds\" title=\"Бинды\">"
-        L"<svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
-        L"<rect x=\"2\" y=\"5\" width=\"20\" height=\"14\" rx=\"2\"/>"
-        L"<circle cx=\"6.5\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/><circle cx=\"11\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/>"
-        L"<circle cx=\"15.5\" cy=\"9.5\" r=\"1\" fill=\"currentColor\"/>"
-        L"<line x1=\"7\" y1=\"14.5\" x2=\"15\" y2=\"14.5\"/></svg></div>"
-        L"<div class=\"yc-rail-item\" id=\"yc-rail-pro\" data-sec=\"pro\" title=\"YM Pro\" style=\"display:none\">⚡</div>"
-        L"<div class=\"yc-rail-spacer\"></div>"
-        L"<div class=\"yc-rail-lbl\">ADV</div>"
-        L"<div class=\"yc-rail-adv\" id=\"yc-adv-toggle\" title=\"Расширенный режим\"><div class=\"yc-knob\"></div></div>"
+        L"<div class=\"yc-rail-item active\" data-sec=\"tweaks\" title=\"Твики\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"3\"></circle><path d=\"M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z\"></path></svg></div>"
+        L"<div class=\"yc-rail-item\" data-sec=\"binds\" title=\"Бинды\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"2\" ry=\"2\"></rect><line x1=\"6\" y1=\"8\" x2=\"6.01\" y2=\"8\"></line><line x1=\"10\" y1=\"8\" x2=\"10.01\" y2=\"8\"></line><line x1=\"14\" y1=\"8\" x2=\"14.01\" y2=\"8\"></line><line x1=\"18\" y1=\"8\" x2=\"18.01\" y2=\"8\"></line><line x1=\"8\" y1=\"12\" x2=\"8.01\" y2=\"12\"></line><line x1=\"12\" y1=\"12\" x2=\"12.01\" y2=\"12\"></line><line x1=\"16\" y1=\"12\" x2=\"16.01\" y2=\"12\"></line><line x1=\"7\" y1=\"16\" x2=\"17\" y2=\"16\"></line></svg></div>"
+        L"<div class=\"yc-rail-item\" data-sec=\"integrations\" title=\"Интеграции\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 22v-5\"></path><path d=\"M9 8V2\"></path><path d=\"M15 8V2\"></path><path d=\"M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z\"></path></svg></div>"
         L"</div>"
         L"<div class=\"yc-pane\">"
-        L"<div class=\"yc-sec active\" data-sec=\"player\">"
-        L"<div class=\"yc-player\"><img class=\"yc-cover\" id=\"yc-cover\"><div class=\"yc-meta\">"
-        L"<div class=\"yc-title\" id=\"yc-title\">—</div><div class=\"yc-artist\" id=\"yc-artist\"></div></div></div>"
-        L"<div class=\"yc-controls\">"
-        L"<button class=\"yc-cb yc-skip\" id=\"yc-prev\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 15 15\" fill=\"currentColor\">"
-        L"<rect x=\"1.5\" y=\"1.5\" width=\"2.5\" height=\"12\" rx=\"1.1\"/><path d=\"M13 2.5 5.5 7.5 13 12.5V2.5z\"/></svg></button>"
-        L"<button class=\"yc-cb yc-play\" id=\"yc-play\">"
-        L"<svg id=\"yc-i-play\" width=\"15\" height=\"15\" viewBox=\"0 0 17 17\" fill=\"currentColor\"><path d=\"M5.5 3.5 14 8.5 5.5 13.5V3.5z\"/></svg>"
-        L"<svg id=\"yc-i-pause\" width=\"15\" height=\"15\" viewBox=\"0 0 17 17\" fill=\"currentColor\" style=\"display:none\">"
-        L"<rect x=\"3.5\" y=\"3\" width=\"3.2\" height=\"11\" rx=\"1.3\"/><rect x=\"10.3\" y=\"3\" width=\"3.2\" height=\"11\" rx=\"1.3\"/></svg></button>"
-        L"<button class=\"yc-cb yc-skip\" id=\"yc-next\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 15 15\" fill=\"currentColor\">"
-        L"<rect x=\"11\" y=\"1.5\" width=\"2.5\" height=\"12\" rx=\"1.1\"/><path d=\"M2 2.5l7.5 5L2 12.5V2.5z\"/></svg></button>"
-        L"<button class=\"yc-cb yc-like\" id=\"yc-like\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
-        L"<path d=\"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 "
-        L"19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z\"/></svg></button>"
-        L"<button class=\"yc-cb yc-dislike\" id=\"yc-dislike\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
-        L"<path d=\"M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 "
-        L".41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z\"/></svg></button>"
-        L"</div></div>"
-        L"<div class=\"yc-sec\" data-sec=\"tweaks\"><div class=\"yc-sectitle\">Твики</div>"
+        L"<div class=\"yc-sec active\" data-sec=\"tweaks\"><div class=\"yc-sectitle\">Твики</div>"
         L"<div id=\"yc-tweaks\"></div>"
+        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Кастомизация</div>"
+        L"<div class=\"yc-cc\"><div class=\"yc-cc-title\">Свое имя</div>"
+        L"<input type=\"text\" class=\"yc-css\" id=\"yc-name\" style=\"min-height:30px;resize:none\" spellcheck=\"false\" placeholder=\"Оставьте пустым для скрытия\"></div>"
         L"<div class=\"yc-cc\"><div class=\"yc-cc-title\">Свой CSS</div>"
         L"<textarea class=\"yc-css\" id=\"yc-css\" spellcheck=\"false\" placeholder=\".selector{ ... }\"></textarea></div>"
         L"</div>"
@@ -1802,35 +1724,13 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Хоткеи Яндекс Музыки</div>"
         L"<div id=\"yc-ymbinds\"></div>"
         L"</div>"
-        L"<div class=\"yc-sec\" data-sec=\"pro\">"
-        L"<div class=\"yc-sectitle\">Перемотка</div>"
-        L"<div class=\"yc-seekrow\"><span class=\"yc-time\" id=\"yc-t-start\">0:00</span>"
-        L"<input type=\"range\" id=\"yc-seek\" min=\"0\" max=\"100\" value=\"0\">"
-        L"<span class=\"yc-time end\" id=\"yc-t-end\">0:00</span></div>"
-        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Громкость</div>"
-        L"<div class=\"yc-volrow\"><span class=\"yc-volicon\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"currentColor\">"
-        L"<path d=\"M3 9v6h4l5 5V4L7 9H3z\"/></svg></span>"
-        L"<input type=\"range\" id=\"yc-vol\" min=\"0\" max=\"1\" step=\"0.01\" value=\"0.5\"></div>"
-        L"<div class=\"yc-sectitle\" style=\"margin-top:14px\">Режимы</div>"
-        L"<div class=\"yc-controls\">"
-        L"<button class=\"yc-cb yc-modebtn\" id=\"yc-shuffle\" title=\"Случайный порядок\">"
-        L"<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
-        L"<polyline points=\"16 3 21 3 21 8\"/><line x1=\"4\" y1=\"20\" x2=\"21\" y2=\"3\"/>"
-        L"<polyline points=\"21 16 21 21 16 21\"/><line x1=\"15\" y1=\"15\" x2=\"21\" y2=\"21\"/>"
-        L"<line x1=\"4\" y1=\"4\" x2=\"9\" y2=\"9\"/></svg></button>"
-        L"<button class=\"yc-cb yc-modebtn\" id=\"yc-repeat\" title=\"Повтор трека\">"
-        L"<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
-        L"<polyline points=\"17 1 21 5 17 9\"/><path d=\"M3 11V9a4 4 0 0 1 4-4h14\"/>"
-        L"<polyline points=\"7 23 3 19 7 15\"/><path d=\"M21 13v2a4 4 0 0 1-4 4H3\"/></svg></button>"
-        L"</div></div>"
+        L"<div class=\"yc-sec\" data-sec=\"integrations\"><div class=\"yc-sectitle\">Интеграции</div>"
+        L"<div class=\"yc-tw-row\"><div class=\"yc-tw-name\">Discord Rich Presence</div><div class=\"yc-tw-switch\" id=\"yc-drpc\"><div class=\"yc-knob\"></div></div></div>"
+        L"<div class=\"yc-tw-row\"><div class=\"yc-tw-name\">HTTP Bridge API</div><div class=\"yc-tw-switch\" id=\"yc-bridge\"><div class=\"yc-knob\"></div></div></div>"
+        L"</div>"
         L"</div></div></div>';"
         L"document.body.appendChild(ROOT);"
         L"document.getElementById('yc-close').onclick=function(){ROOT.classList.remove('open');};"
-        L"document.getElementById('yc-prev').onclick=function(){window.__ymhubQ.push('prev');};"
-        L"document.getElementById('yc-play').onclick=function(){window.__ymhubQ.push('toggle');};"
-        L"document.getElementById('yc-next').onclick=function(){window.__ymhubQ.push('next');};"
-        L"document.getElementById('yc-like').onclick=function(){window.__ymhubQ.push('like');};"
-        L"document.getElementById('yc-dislike').onclick=function(){window.__ymhubQ.push('dislike');};"
         // Rail navigation — switches the active section; the rail itself
         // (and the Плеер/Твики items) is always present in both Simple and
         // Advanced, only the "pro" item's visibility depends on the toggle.
@@ -1840,20 +1740,6 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-sec'),function(s){s.classList.remove('active');});"
         L"item.classList.add('active');"
         L"document.querySelector('#ymhub-cheat .yc-sec[data-sec=\"'+item.dataset.sec+'\"]').classList.add('active');};});"
-        // Advanced mode is a pure page-local display preference (which
-        // rail items are visible) — persisted in this page's own
-        // localStorage, never round-tripped through the DLL/host at all.
-        L"var advBtn=document.getElementById('yc-adv-toggle');"
-        L"var railPro=document.getElementById('yc-rail-pro');"
-        L"function applyAdvanced(on){advBtn.classList.toggle('on',on);railPro.style.display=on?'':'none';"
-        L"if(!on&&railPro.classList.contains('active'))document.getElementById('yc-rail-player').click();}"
-        L"applyAdvanced(localStorage.getItem('ymhubAdvanced')==='1');"
-        L"advBtn.onclick=function(){var on=!advBtn.classList.contains('on');"
-        L"localStorage.setItem('ymhubAdvanced',on?'1':'0');applyAdvanced(on);};"
-        L"document.getElementById('yc-seek').addEventListener('input',function(){window.__ymhubQ.push('seek:'+this.value);});"
-        L"document.getElementById('yc-vol').addEventListener('input',function(){window.__ymhubQ.push('vol:'+this.value);});"
-        L"document.getElementById('yc-shuffle').onclick=function(){window.__ymhubQ.push('shuffle');};"
-        L"document.getElementById('yc-repeat').onclick=function(){window.__ymhubQ.push('repeat');};"
         L"var twWrap=document.getElementById('yc-tweaks');"
         L"window.__ymhubTwLabels.forEach(function(label,i){"
         L"var row=document.createElement('div');row.className='yc-tw-row';"
@@ -1862,8 +1748,14 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"var knob=document.createElement('div');knob.className='yc-knob';sw.appendChild(knob);"
         L"sw.onclick=function(){sw.classList.toggle('on');window.__ymhubQ.push('tweak:'+i);};"
         L"row.appendChild(nm);row.appendChild(sw);twWrap.appendChild(row);});"
+        L"var nameEl=document.getElementById('yc-name');nameEl.value=window.__ymhubName||'';"
+        L"nameEl.addEventListener('change',function(){window.__ymhubQ.push('name:'+this.value);});"
         L"document.getElementById('yc-css').addEventListener('change',function(){"
         L"window.__ymhubQ.push('css:'+this.value);});"
+        L"var swDrpc=document.getElementById('yc-drpc');if(window.__ymhubDrpc)swDrpc.classList.add('on');"
+        L"swDrpc.onclick=function(){var on=!swDrpc.classList.contains('on');swDrpc.classList.toggle('on');window.__ymhubQ.push('drpc:'+(on?1:0));};"
+        L"var swBridge=document.getElementById('yc-bridge');if(window.__ymhubBridge)swBridge.classList.add('on');"
+        L"swBridge.onclick=function(){var on=!swBridge.classList.contains('on');swBridge.classList.toggle('on');window.__ymhubQ.push('bridge:'+(on?1:0));};"
         L"window.__ymhubQ=window.__ymhubQ||[];"
         L"ymhubBuildBinds('yc-binds',['Показать/скрыть плеер','Предыдущий трек','Следующий трек',"
         L"'Пауза/воспроизведение','Нравится','Не нравится'],'rebind:',"
@@ -1899,119 +1791,6 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"window.__ymhubShiftArmed=false;};"
         L"document.addEventListener('keydown',window.__ymhubShiftDown,true);"
         L"document.addEventListener('keyup',window.__ymhubShiftUp,true);"
-        // Shared by syncPlaying and syncPro (each calls getPb() fresh, not
-        // once at build time — the element identity changes when the page
-        // navigates between "Моя волна" and everywhere else).
-        L"function getPb(){return document.querySelector(\"[data-test-id='PLAYERBAR_DESKTOP']\")||"
-        L"document.querySelector(\"[data-test-id='VIBE_PLAYERBAR']\");}"
-        L"function qIn(pb,id){return pb.querySelector(\"[data-test-id='\"+id+\"']\");}"
-        L"function syncPlaying(){"
-        // "Моя волна" (Vibe) renders its own separate player bar
-        // (VIBE_PLAYERBAR) instead of the regular PLAYERBAR_DESKTOP one —
-        // confirmed empirically (PLAYERBAR_DESKTOP is simply absent while
-        // that page is open) — so both are tried, in the order they're
-        // actually likely to exist.
-        L"var pb=getPb();if(!pb)return;"
-        L"function q(id){return qIn(pb,id);}"
-        // Both TRACK_TITLE and VIBE_PLAYERBAR_TRACK_NAME wrap a marquee
-        // pair of two duplicate text nodes for scroll-on-overflow — taking
-        // textContent on the wrapper concatenates both copies, so the
-        // first child specifically is used instead.
-        L"var t=q('TRACK_TITLE')||q('VIBE_PLAYERBAR_TRACK_NAME');"
-        // SEPARATED_ARTIST_TITLE only exists inside PLAYERBAR_DESKTOP;
-        // Vibe has no equivalent in its own player bar, only the big
-        // page heading (a hash-suffixed class, less stable, but it's the
-        // only thing showing it in that view).
-        L"var a=q('SEPARATED_ARTIST_TITLE')||document.querySelector(\"[class*='VibePage_text__']\");"
-        L"var c=q('ENTITY_COVER_IMAGE')||q('VIBE_ALBUM_COVER');"
-        L"var lk=q('LIKE_BUTTON');"
-        L"var tt=t?(t.children[0]?t.children[0].textContent:t.textContent):'';"
-        L"document.getElementById('yc-title').textContent=tt||'\\u2014';"
-        L"document.getElementById('yc-artist').textContent=a?a.textContent:'';"
-        L"var csrc=c?(c.src||(c.querySelector&&c.querySelector('img')?c.querySelector('img').src:'')):'';"
-        L"if(csrc)document.getElementById('yc-cover').src=csrc;"
-        L"document.getElementById('yc-like').classList.toggle('on',!!lk&&lk.getAttribute('aria-pressed')==='true');"
-        // Confirmed empirically: playing swaps the button's data-test-id
-        // to PAUSE_BUTTON entirely (not just its aria-label on the same
-        // id) — same family as SHUFFLE_BUTTON_ON/OFF and
-        // REPEAT_BUTTON_NO_REPEAT, so presence/absence of PAUSE_BUTTON is
-        // the state signal, not any attribute on PLAY_BUTTON.
-        L"var playing=!!q('PAUSE_BUTTON');"
-        L"document.getElementById('yc-i-play').style.display=playing?'none':'';"
-        L"document.getElementById('yc-i-pause').style.display=playing?'':'none';"
-        L"}"
-        // Advanced "YM Pro" sync — seek/volume mirror the real sliders
-        // (skipped while the user has OUR slider focused, so polling
-        // doesn't fight an in-progress drag); shuffle reads .disabled too
-        // since YM itself disables that button in some queue contexts
-        // (confirmed empirically — clicks on a disabled SHUFFLE_BUTTON are
-        // simply no-ops, nothing wrong with the click mechanism itself).
-        // Repeat here is a plain two-state toggle (NO_REPEAT/REPEAT_ONE) —
-        // unlike some other players YM has no separate "repeat all".
-        L"function syncPro(){"
-        L"var pb=getPb();if(!pb)return;"
-        L"function q(id){return qIn(pb,id);}"
-        // On "Моя волна" the timecode element is a plain DIV (a passive
-        // progress bar, no fixed queue to seek within) rather than the
-        // real range input the rest of the app uses — confirmed live.
-        // Mirror it as a disabled slider instead of trying to drive a
-        // value-set against an element that has no .value at all.
-        L"var seekEl=q('TIMECODE_SLIDER')||q('VIBE_PLAYERBAR_TIMECODE_SLIDER');"
-        L"var mySeek=document.getElementById('yc-seek');"
-        L"var seekable=!!seekEl&&seekEl.tagName==='INPUT';"
-        L"mySeek.disabled=!seekable;"
-        L"if(seekable&&document.activeElement!==mySeek){"
-        L"mySeek.max=seekEl.getAttribute('max')||100;mySeek.value=seekEl.value;"
-        L"var ts=q('TIMECODE_TIME_START'),te=q('TIMECODE_TIME_END');"
-        L"document.getElementById('yc-t-start').textContent=ts?ts.textContent:'0:00';"
-        L"document.getElementById('yc-t-end').textContent=te?te.textContent:'0:00';"
-        L"}else if(!seekable){"
-        L"var vtc=q('VIBE_PLAYERBAR_TIMECODE'),parts=vtc?vtc.textContent.split('/'):null;"
-        L"document.getElementById('yc-t-start').textContent=parts?parts[0].trim():'0:00';"
-        L"document.getElementById('yc-t-end').textContent=parts?parts[1].trim():'0:00';"
-        L"}"
-        L"var volEl=q('CHANGE_VOLUME_SLIDER');var myVol=document.getElementById('yc-vol');"
-        L"if(volEl&&document.activeElement!==myVol)myVol.value=volEl.value;"
-        // Confirmed live: like PLAY_BUTTON/PAUSE_BUTTON, the id itself
-        // swaps to SHUFFLE_BUTTON_ON when active (plain SHUFFLE_BUTTON
-        // otherwise) — an exact-match lookup only ever sees the off state.
-        L"var shuf=pb.querySelector(\"[data-test-id^='SHUFFLE_BUTTON']\");var shufBtn=document.getElementById('yc-shuffle');"
-        L"if(shuf){shufBtn.disabled=shuf.disabled;"
-        L"shufBtn.classList.toggle('on',shuf.getAttribute('data-test-id')!=='SHUFFLE_BUTTON');}"
-        // Confirmed live: repeat actually has *three* states (cycles
-        // NO_REPEAT -> REPEAT_BUTTON_REPEAT_CONTEXT -> _REPEAT_ONE ->
-        // back), not just the two this was first tested against — rather
-        // than allowlist every "on" suffix, anything that isn't the bare
-        // NO_REPEAT id counts as on.
-        L"var rep=pb.querySelector(\"[data-test-id^='REPEAT_BUTTON']\");"
-        L"if(rep)document.getElementById('yc-repeat').classList.toggle('on',"
-        L"rep.getAttribute('data-test-id')!=='REPEAT_BUTTON_NO_REPEAT');"
-        L"}"
-        L"window.__ymhubSyncPlaying=syncPlaying;"
-        // This interval runs entirely inside the page's own JS engine, on
-        // its own event loop — completely outside anything the DLL's own
-        // native-side minimize/focus guards (CdpUnsafeNow) can see or
-        // pause. It kept running every 700ms regardless of what the
-        // native side did, which is exactly why those guards alone never
-        // fully closed the minimize/focus-loss crash: this was the other
-        // half. document.hidden is true exactly when a window minimizes
-        // or gets fully occluded (e.g. by another app's exclusive
-        // fullscreen) — skipping the actual DOM work on those ticks
-        // keeps the crash-prone code from ever running during exactly
-        // the moments that were racing it.
-        // A rapid, repeated back-and-forth (alt-tabbing fast, or minimize
-        // immediately followed by refocus) can still land a sync call
-        // right in the settling period after visibilitychange fires but
-        // before document.hidden has genuinely stabilized — confirmed
-        // live under randomized rapid-fire testing. The listener plus a
-        // short cooldown after *any* change closes that: not just "is it
-        // hidden right now" but "did it change recently at all."
-        L"var __ymhubHideAt=0;"
-        L"document.addEventListener('visibilitychange',function(){__ymhubHideAt=Date.now();});"
-        L"function __ymhubSyncSafe(){"
-        L"if(!document.hidden&&(Date.now()-__ymhubHideAt)>1500){syncPlaying();syncPro();}}"
-        L"window.__ymhubSyncTimer=setInterval(__ymhubSyncSafe,700);"
-        L"if(!document.hidden){syncPlaying();syncPro();}"
         L"}"
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
@@ -2035,7 +1814,10 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         preamble += "\"" + CdpJsonEscape(CdpUtf8(kTweakLabels[i])) + "\"";
     }
     preamble += "];window.__ymhubMask=" + std::to_string(mask) + ";"
-        "window.__ymhubCss=\"" + CdpJsonEscape(CdpUtf8(customCssW ? customCssW : L"")) + "\";";
+        "window.__ymhubCss=\"" + CdpJsonEscape(CdpUtf8(customCssW ? customCssW : L"")) + "\";"
+        "window.__ymhubName=\"" + CdpJsonEscape(CdpUtf8(g_customName.c_str())) + "\";"
+        "window.__ymhubDrpc=" + std::to_string(g_discordEnabled ? 1 : 0) + ";"
+        "window.__ymhubBridge=" + std::to_string(g_bridgeEnabled ? 1 : 0) + ";";
     preamble += "window.__ymhubKeys=[";
     for (int i = 0; i < 6; i++) {
         if (i) preamble += ",";
@@ -2186,6 +1968,22 @@ static void DispatchCheatAction(const std::string& item) {
         std::wstring cssW(wlen, 0);
         if (wlen > 0) MultiByteToWideChar(CP_UTF8, 0, cssUtf8.c_str(), (int)cssUtf8.size(), cssW.data(), wlen);
         SaveCustomCss(cssW);
+        return;
+    }
+    if (item.rfind("name:", 0) == 0) {
+        std::string nameUtf8 = item.substr(5);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, nameUtf8.c_str(), (int)nameUtf8.size(), nullptr, 0);
+        std::wstring nameW(wlen, 0);
+        if (wlen > 0) MultiByteToWideChar(CP_UTF8, 0, nameUtf8.c_str(), (int)nameUtf8.size(), nameW.data(), wlen);
+        SaveCustomName(nameW);
+        return;
+    }
+    if (item.rfind("drpc:", 0) == 0) {
+        SaveDiscordSetting(item.substr(5) == "1");
+        return;
+    }
+    if (item.rfind("bridge:", 0) == 0) {
+        SaveBridgeSetting(item.substr(7) == "1");
         return;
     }
     // "rebind:<idx>:<mods>:<vk>" from the in-page binds capture UI --
@@ -2371,6 +2169,11 @@ static DWORD WINAPI HttpBridgeThreadFn(LPVOID) {
     while (g_run) {
         SOCKET c = accept(listener, nullptr, nullptr);
         if (c == INVALID_SOCKET) { if (!g_run) break; continue; }
+
+        if (!g_bridgeEnabled) {
+            closesocket(c);
+            continue;
+        }
 
         DWORD tv = 3000;
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
@@ -2905,7 +2708,6 @@ static std::string ToUtf8(const std::wstring& w) {
 static const char* DISCORD_CLIENT_ID = "1518944722310266911";
 static HANDLE g_discordPipe = nullptr;
 static HANDLE g_discordEvt = nullptr;
-static bool   g_discordEnabled = false;
 static time_t g_discordStart = 0;
 static std::wstring g_discordLastTrack, g_discordLastArtist, g_discordLastCover;
 static bool g_discordWasSent = false;
@@ -2916,6 +2718,14 @@ static void LoadDiscordSetting() {
 static void SaveDiscordSetting(bool on) {
     g_discordEnabled = on;
     RegSetDW(HKEY_CURRENT_USER, REG_APP, L"DiscordRpc", on ? 1 : 0);
+}
+
+static void LoadBridgeSetting() {
+    g_bridgeEnabled = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"BridgeApi", 1) != 0;
+}
+static void SaveBridgeSetting(bool on) {
+    g_bridgeEnabled = on;
+    RegSetDW(HKEY_CURRENT_USER, REG_APP, L"BridgeApi", on ? 1 : 0);
 }
 
 static void DiscordClose() {
@@ -3558,6 +3368,7 @@ static DWORD WINAPI WorkerThread(LPVOID) {
     LogMsg("DLL attached, pid=" + std::to_string(GetCurrentProcessId()));
     InitializeCriticalSection(&g_artCS);
     LoadDiscordSetting();
+    LoadBridgeSetting();
     // TEMP CONTROL TEST round 2: CDP threads back on, mini-player's own
     // WebView2 (UiThread, disabled separately below) still off — isolating
     // whether the mini-player alone is sufficient, without also needing
@@ -3599,6 +3410,14 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID) {
         CreateThread(nullptr, 0, UiThread,      nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         g_run = false;
+        if (g_transitionHook) {
+            UnhookWindowsHookEx(g_transitionHook);
+            g_transitionHook = nullptr;
+        }
+        if (g_hook) {
+            UnhookWindowsHookEx(g_hook);
+            g_hook = nullptr;
+        }
         // Wake up hotkey/UI message loops so they can exit
         if (g_hkTid) PostThreadMessageW(g_hkTid, WM_QUIT, 0, 0);
         if (g_uiTid) PostThreadMessageW(g_uiTid, WM_QUIT, 0, 0);
