@@ -1613,7 +1613,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // all despite being declared. rgba background + a real accent-
         // tinted glow (same language as the connect toast) is what
         // actually reads as glass instead of just a flat dark panel.
-        L"#ymhub-cheat .yc-panel{max-height:calc(100vh - 36px);overflow:auto;"
+        L"#ymhub-cheat .yc-panel{box-sizing:border-box;max-height:calc(100vh - 36px);overflow:auto;"
         L"background:rgba(13,13,20,.74);backdrop-filter:blur(24px);"
         L"border:1px solid rgba(91,143,255,.28);border-radius:16px;padding:16px;"
         L"box-shadow:0 0 0 1px rgba(91,143,255,.06),0 16px 48px rgba(0,0,0,.5),"
@@ -1736,10 +1736,18 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         // Advanced, only the "pro" item's visibility depends on the toggle.
         L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-rail-item'),function(item){"
         L"item.onclick=function(){"
+        L"var p=document.querySelector('#ymhub-cheat .yc-panel');"
+        L"var h1=p.getBoundingClientRect().height;"
         L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-rail-item'),function(i){i.classList.remove('active');});"
         L"Array.prototype.forEach.call(document.querySelectorAll('#ymhub-cheat .yc-sec'),function(s){s.classList.remove('active');});"
         L"item.classList.add('active');"
-        L"document.querySelector('#ymhub-cheat .yc-sec[data-sec=\"'+item.dataset.sec+'\"]').classList.add('active');};});"
+        L"document.querySelector('#ymhub-cheat .yc-sec[data-sec=\"'+item.dataset.sec+'\"]').classList.add('active');"
+        L"var h2=p.getBoundingClientRect().height;"
+        L"if(h1!==h2){"
+        L"p.style.height=h1+'px';p.style.transition='none';p.offsetHeight;"
+        L"p.style.transition='height .2s cubic-bezier(.2,0,0,1)';p.style.height=h2+'px';"
+        L"setTimeout(function(){p.style.height='';p.style.transition='';},200);}"
+        L"};});"
         L"var twWrap=document.getElementById('yc-tweaks');"
         L"window.__ymhubTwLabels.forEach(function(label,i){"
         L"var row=document.createElement('div');row.className='yc-tw-row';"
@@ -2435,6 +2443,69 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
 // via LogBadgeThread's own first 2s tick — pulled forward into this
 // sequence so they're both real work AND visible progress instead of
 // two separate things.
+static void CdpShowChangelog() {
+    std::wstring js =
+        L"(function(){"
+        L"if(document.getElementById('ymhub-changelog'))return;"
+        L"var o=document.createElement('div');o.id='ymhub-changelog';"
+        L"o.style.position='fixed';o.style.inset='0';o.style.zIndex='2147483647';"
+        L"o.style.background='rgba(0,0,0,0.6)';o.style.backdropFilter='blur(24px)';"
+        L"o.style.display='flex';o.style.alignItems='center';o.style.justifyContent='center';"
+        L"o.style.opacity='0';o.style.transition='opacity 0.3s';"
+        L"o.style.fontFamily='\"Yandex Sans\", sans-serif';"
+        L"var c=document.createElement('div');"
+        L"c.style.background='#18181b';c.style.borderRadius='16px';"
+        L"c.style.padding='24px';c.style.width='420px';c.style.color='#fff';"
+        L"c.style.boxShadow='0 8px 32px rgba(0,0,0,0.6)';"
+        L"c.style.transform='scale(0.95)';c.style.transition='transform 0.3s';"
+        L"c.style.boxSizing='border-box';"
+        L"c.innerHTML="
+        L"'<div style=\"display:flex; justify-content:space-between; align-items:center; margin-bottom:24px;\">'+"
+        L"'<div style=\"display:flex; align-items:center; gap:12px;\">'+"
+        L"'<div style=\"width:36px; height:36px; background:#447bfe; border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:18px;\">Y</div>'+"
+        L"'<div style=\"font-size:20px; font-weight:700;\">YMHub</div>'+"
+        L"'</div>'+"
+        L"'<button id=\"ymhub-cl-close\" style=\"width:28px; height:28px; background:rgba(255,255,255,0.05); border:none; border-radius:6px; color:#fff; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 0.2s;\">'+"
+        L"'<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M18 6L6 18M6 6l12 12\"></path></svg>'+"
+        L"'</button>'+"
+        L"'</div>'+"
+        L"'<div style=\"display:flex; margin-bottom:20px; gap:40px;\">'+"
+        L"'<div><div style=\"font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;\">ВЕРСИЯ</div>'+"
+        L"'<div style=\"font-size:14px; font-weight:600;\">v2.0</div></div>'+"
+        L"'<div><div style=\"font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;\">ОБНОВЛЕНО</div>'+"
+        L"'<div style=\"font-size:14px; font-weight:600;\">Сегодня</div></div>'+"
+        L"'</div>'+"
+        L"'<div style=\"height:1px; background:rgba(255,255,255,0.08); margin-bottom:20px;\"></div>'+"
+        L"'<div style=\"font-size:11px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:12px;\">ЧТО НОВОГО</div>'+"
+        L"'<div style=\"display:flex; flex-direction:column; gap:12px; margin-bottom:24px;\">'+"
+        L"'<div style=\"display:flex; gap:8px;\"><div style=\"width:6px; height:6px; background:#447bfe; border-radius:50%; flex-shrink:0; margin-top:6px;\"></div>'+"
+        L"'<div style=\"font-size:14px; color:#ddd; line-height:1.4;\">Интегрирована аппаратная блокировка телеметрии и метрик (Network.setBlockedURLs).</div></div>'+"
+        L"'<div style=\"display:flex; gap:8px;\"><div style=\"width:6px; height:6px; background:#447bfe; border-radius:50%; flex-shrink:0; margin-top:6px;\"></div>'+"
+        L"'<div style=\"font-size:14px; color:#ddd; line-height:1.4;\">Глобальный хук перехвата сообщений заменен на оптимизированный обработчик событий окна (WH_CBT).</div></div>'+"
+        L"'<div style=\"display:flex; gap:8px;\"><div style=\"width:6px; height:6px; background:#447bfe; border-radius:50%; flex-shrink:0; margin-top:6px;\"></div>'+"
+        L"'<div style=\"font-size:14px; color:#ddd; line-height:1.4;\">Бинарный файл пересобран с использованием LTO/LTCG для максимальной производительности.</div></div>'+"
+        L"'</div>'+"
+        L"'<div style=\"height:1px; background:rgba(255,255,255,0.08); margin-bottom:20px;\"></div>'+"
+        L"'<div style=\"display:flex; justify-content:space-between; align-items:center;\">'+"
+        L"'<a href=\"https://github.com/onemorefix1337/ymhub\" target=\"_blank\" style=\"font-size:13px; color:#888; text-decoration:none; cursor:pointer; transition:color 0.2s;\">Открыть на GitHub</a>'+"
+        L"'<button id=\"ymhub-cl-btn\" style=\"padding:10px 24px; background:#447bfe; border:none; border-radius:8px; color:#fff; font-weight:600; font-size:14px; cursor:pointer; display:flex; align-items:center; gap:6px; transition:opacity 0.2s;\">'+"
+        L"'Понятно <svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"currentColor\"><path d=\"M8 5v14l11-7z\"/></svg>'+"
+        L"'</button>'+"
+        L"'</div>';"
+        L"o.appendChild(c);document.body.appendChild(o);"
+        L"var cls=function(){o.style.opacity='0';c.style.transform='scale(0.95)';setTimeout(function(){o.remove();},300);};"
+        L"document.getElementById('ymhub-cl-close').onclick=cls;"
+        L"document.getElementById('ymhub-cl-btn').onclick=cls;"
+        L"document.getElementById('ymhub-cl-close').onmouseenter=function(){this.style.background='rgba(255,255,255,0.1)'};"
+        L"document.getElementById('ymhub-cl-close').onmouseleave=function(){this.style.background='rgba(255,255,255,0.05)'};"
+        L"document.getElementById('ymhub-cl-btn').onmouseenter=function(){this.style.opacity='0.85'};"
+        L"document.getElementById('ymhub-cl-btn').onmouseleave=function(){this.style.opacity='1'};"
+        L"var a=c.querySelector('a');a.onmouseenter=function(){this.style.color='#aaa'};a.onmouseleave=function(){this.style.color='#888'};"
+        L"requestAnimationFrame(function(){o.style.opacity='1';c.style.transform='scale(1)';});"
+        L"})()";
+    CdpRunJs(CdpUtf8(js.c_str()));
+}
+
 static const DWORD STEP_MIN_MS = 550;
 
 static DWORD WINAPI CdpAnnounceThread(LPVOID) {
@@ -2453,6 +2524,13 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
         return 0;
     }
     LogMsg("CDP connected");
+
+    DWORD ver = RegGetDW(HKEY_CURRENT_USER, REG_APP, L"Version", 0);
+    if (ver < 20) {
+        RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Version", 20);
+        WaitUntilSafeForCdp();
+        CdpShowChangelog();
+    }
     DWORD elapsed = GetTickCount() - stepStart;
     if (elapsed < STEP_MIN_MS) Sleep(STEP_MIN_MS - elapsed);
 
@@ -2484,6 +2562,7 @@ static DWORD WINAPI CdpAnnounceThread(LPVOID) {
     Sleep(STEP_MIN_MS);
 
     CdpInitToastDone(true, L"Подключено");
+
     return 0;
 }
 
