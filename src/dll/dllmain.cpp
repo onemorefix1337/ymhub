@@ -63,6 +63,7 @@ static std::wstring  g_domCoverUrl;
 // would skip live keys mid-rebind — no such UI exists yet post-migration,
 // stays as a plain local for when in-page rebinding lands.
 static bool          g_rebinding  = false;
+static bool          g_canHookYmKeys = true;
 // Overlay window handle — created by UiThread (Фаза 4a). Declared this
 // early because ExecCmd (below) needs to PostMessageW to it.
 static HWND          g_hwnd       = nullptr;
@@ -2024,6 +2025,29 @@ static void DispatchCheatAction(const std::string& item) {
     }
 }
 
+static void CdpUpdateHookAllowed() {
+    std::string resp;
+    {
+        std::lock_guard<std::mutex> lk(g_cdpMx);
+        if (!CdpEnsureConnected()) return;
+        std::string req = "{\"id\":15,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":"
+            "\"(function(){"
+            "var r=window.location.pathname;"
+            "var inMenu=r==='/home'||r.startsWith('/collection')||r.indexOf('/playlists/')!==-1;"
+            "var cheat=document.getElementById('ymhub-cheat');"
+            "var cheatOpen=cheat&&cheat.style.opacity==='1';"
+            "var ae=document.activeElement;"
+            "var isInput=ae&&(ae.tagName==='INPUT'||ae.tagName==='TEXTAREA');"
+            "return inMenu&&!cheatOpen&&!isInput;"
+            "})()\","
+            "\"returnByValue\":true}}";
+        if (!CdpSend(req)) { CdpClose(); return; }
+        if (!CdpRecv(resp)) { CdpClose(); return; }
+    }
+    if (resp.find("\"value\":true") != std::string::npos) g_canHookYmKeys = true;
+    else if (resp.find("\"value\":false") != std::string::npos) g_canHookYmKeys = false;
+}
+
 // Drains window.__ymhubQ (pushed by the overlay's own button/checkbox/
 // textarea handlers) every tick. id:10, distinct from every other fixed
 // request id already in use on this connection.
@@ -2273,6 +2297,7 @@ static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
             // queued before this tick is already reflected in native state
             // by the time InjectMenu reads it, so the resync matches what
             // the user already sees and there's nothing to visibly correct.
+            CdpUpdateHookAllowed();
             CdpQueueDrain();
             CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
         }
@@ -2381,7 +2406,7 @@ static LRESULT CALLBACK LLKeyProc(int code, WPARAM wp, LPARAM lp) {
         static HWND s_ymWin = nullptr; static ULONGLONG s_ymTick = 0;
         ULONGLONG now = GetTickCount64();
         if (now - s_ymTick > 500) { s_ymWin = FindMainWnd(); s_ymTick = now; }
-        if (s_ymWin && GetForegroundWindow() == s_ymWin) {
+        if (s_ymWin && GetForegroundWindow() == s_ymWin && g_canHookYmKeys) {
             for (int i = 0; i < 13; i++)
                 if (g_ymKeys[i].vk && mods == g_ymKeys[i].mods && k->vkCode == g_ymKeys[i].vk)
                     { CdpSendYmKey(i); return 1; }
