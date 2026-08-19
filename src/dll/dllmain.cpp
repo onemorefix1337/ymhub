@@ -64,6 +64,9 @@ static std::wstring  g_domCoverUrl;
 // stays as a plain local for when in-page rebinding lands.
 static bool          g_rebinding  = false;
 static bool          g_canHookYmKeys = true;
+// Set by SaveTweaks so CheatMenuThreadFn calls ApplyTweaksNow on next tick,
+// OUTSIDE g_cdpMx — prevents the deadlock that caused the 10s+ toggle lag.
+static std::atomic<bool> g_pendingApply{ false };
 // Overlay window handle — created by UiThread (Фаза 4a). Declared this
 // early because ExecCmd (below) needs to PostMessageW to it.
 static HWND          g_hwnd       = nullptr;
@@ -145,7 +148,7 @@ static void LoadTweaks() {
 }
 static void SaveTweaks() {
     RegSetDW(HKEY_CURRENT_USER, REG_APP, L"Tweaks", g_tweaksMask);
-    ApplyTweaksNow();
+    g_pendingApply.store(true, std::memory_order_relaxed);
 }
 static void SaveCustomName(const std::wstring& s) {
     g_customName = s;
@@ -863,7 +866,7 @@ static void WaitUntilSafeForCdp() {
 }
 
 static bool CdpSend(const std::string& msg);
-static bool CdpRecv(std::string& out);
+static bool CdpRecv(std::string& out, int expectedId = -1);
 
 static bool CdpEnsureConnected() {
     if (g_cdpWs) return true;
@@ -886,10 +889,7 @@ static bool CdpEnsureConnected() {
     WinHttpCloseHandle(hReq);
     if (!g_cdpWs) { CdpClose(); return false; }
     
-    CdpSend("{\"id\":999,\"method\":\"Network.enable\"}");
-    std::string resp; CdpRecv(resp);
-    CdpSend("{\"id\":1000,\"method\":\"Network.setBlockedURLs\",\"params\":{\"urls\":[\"*mc.yandex.ru*\",\"*metrika*\",\"*sentry*\",\"*appmetrica*\",\"*crashlytics*\"]}}");
-    CdpRecv(resp);
+    // Network blocking removed to prevent event firehose
     
     return true;
 }
@@ -900,12 +900,29 @@ static bool CdpSend(const std::string& msg) {
         (PVOID)msg.data(), (DWORD)msg.size()) == NO_ERROR;
 }
 
-static bool CdpRecv(std::string& out) {
+static bool CdpRecv(std::string& out, int expectedId) {
     if (!g_cdpWs) return false;
     char buf[16384]; DWORD read = 0; WINHTTP_WEB_SOCKET_BUFFER_TYPE bt;
-    if (WinHttpWebSocketReceive(g_cdpWs, buf, sizeof(buf), &read, &bt) != NO_ERROR) return false;
-    out.assign(buf, read);
-    return true;
+    std::string buffer;
+    while (true) {
+        if (WinHttpWebSocketReceive(g_cdpWs, buf, sizeof(buf), &read, &bt) != NO_ERROR) {
+            LogMsg("WinHttpWebSocketReceive error");
+            return false;
+        }
+        if (bt == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE || read == 0) {
+            LogMsg("WinHttpWebSocketReceive closed or 0 bytes");
+            return false;
+        }
+        buffer.append(buf, read);
+        if (bt == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE || bt == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
+            if (buffer.find("\"id\":") != std::string::npos || buffer.find("\"error\":") != std::string::npos) {
+                out = std::move(buffer);
+                return true;
+            }
+            // Discard event
+            buffer.clear();
+        }
+    }
 }
 
 // Fire-and-forget JS eval — used for the connect-confirmation banner.
@@ -915,7 +932,7 @@ static void CdpRunJs(const std::string& jsUtf8) {
     std::string req = "{\"id\":9,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" +
         CdpJsonEscape(jsUtf8) + "\"}}";
     if (!CdpSend(req)) { CdpClose(); return; }
-    std::string resp; CdpRecv(resp);
+    std::string resp; CdpRecv(resp, 9);
 }
 
 // ── Compact step-counter connect toast, injected into YM's page ──
@@ -1755,7 +1772,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"var nm=document.createElement('div');nm.className='yc-tw-name';nm.textContent=label;"
         L"var sw=document.createElement('div');sw.className='yc-tw-switch';sw.id='yc-tw-'+i;"
         L"var knob=document.createElement('div');knob.className='yc-knob';sw.appendChild(knob);"
-        L"sw.onclick=function(){sw.classList.toggle('on');window.__ymhubQ.push('tweak:'+i);};"
+        L"sw.onclick=function(){sw.classList.toggle('on');sw.dataset.clicked=Date.now();window.__ymhubQ.push('tweak:'+i);};"
         L"row.appendChild(nm);row.appendChild(sw);twWrap.appendChild(row);});"
         L"var nameEl=document.getElementById('yc-name');nameEl.value=window.__ymhubName||'';"
         L"nameEl.addEventListener('change',function(){window.__ymhubQ.push('name:'+this.value);});"
@@ -1804,7 +1821,7 @@ static void CdpInjectMenu(DWORD mask, const wchar_t* customCssW) {
         L"var cssBox=document.getElementById('yc-css');"
         L"if(document.activeElement!==cssBox)cssBox.value=window.__ymhubCss||'';"
         L"for(var i=0;i<8;i++){var sw=document.getElementById('yc-tw-'+i);"
-        L"if(sw)sw.classList.toggle('on',!!(window.__ymhubMask&(1<<i)));}"
+        L"if(sw&&!(sw.dataset.clicked&&Date.now()-sw.dataset.clicked<1500))sw.classList.toggle('on',!!(window.__ymhubMask&(1<<i)));}"
         // Skips any button mid-capture ('rec') so a native-side refresh
         // landing while the user is actively pressing a new key can't
         // stomp the "Нажмите клавишу…" placeholder out from under them.
@@ -1966,7 +1983,7 @@ static void DispatchCheatAction(const std::string& item) {
     }
     if (item.rfind("tweak:", 0) == 0) {
         int idx = atoi(item.c_str() + 6);
-        if (idx < 0 || idx >= 9) return;
+        if (idx < 0 || idx >= TWEAK_COUNT) return;
         g_tweaksMask ^= (1u << idx);
         SaveTweaks();
         return;
@@ -2042,7 +2059,7 @@ static void CdpUpdateHookAllowed() {
             "})()\","
             "\"returnByValue\":true}}";
         if (!CdpSend(req)) { CdpClose(); return; }
-        if (!CdpRecv(resp)) { CdpClose(); return; }
+        if (!CdpRecv(resp, 7)) { CdpClose(); return; }
     }
     if (resp.find("\"value\":true") != std::string::npos) g_canHookYmKeys = true;
     else if (resp.find("\"value\":false") != std::string::npos) g_canHookYmKeys = false;
@@ -2060,7 +2077,7 @@ static void CdpQueueDrain() {
             "\"(function(){var q=window.__ymhubQ||[];window.__ymhubQ=[];return JSON.stringify(q);})()\","
             "\"returnByValue\":true}}";
         if (!CdpSend(req)) { CdpClose(); return; }
-        if (!CdpRecv(resp)) { CdpClose(); return; }
+        if (!CdpRecv(resp, 10)) { CdpClose(); return; }
     }
     auto p = resp.find("\"value\":");
     if (p == std::string::npos) return;
@@ -2299,18 +2316,15 @@ static DWORD WINAPI CheatMenuThreadFn(LPVOID) {
             // the user already sees and there's nothing to visibly correct.
             CdpUpdateHookAllowed();
             CdpQueueDrain();
+            // Apply any tweak change signalled by SaveTweaks — outside g_cdpMx,
+            // so no deadlock with the drain above.
+            if (g_pendingApply.exchange(false, std::memory_order_relaxed)) {
+                ApplyTweaksNow();
+            }
             CdpInjectMenu(g_tweaksMask, g_customCss.c_str());
         }
-        // Was 300ms — that's roughly 3x/sec of CDP traffic hitting the
-        // renderer just to keep an already-injected menu current, which
-        // is what made the minimize race so easy to hit in practice. The
-        // menu doesn't need sub-second freshness; cutting the poll rate
-        // directly cuts how often a call can be in flight when a
-        // transition happens, which the guards above can't fully do
-        // alone (the actual danger window is the renderer's own JS
-        // execution time, not anything this thread's local timeout
-        // controls).
-        Sleep(1000);
+        // Reduced from 1000ms: tweaks apply on next tick (≈300ms).
+        Sleep(300);
     }
     return 0;
 }
